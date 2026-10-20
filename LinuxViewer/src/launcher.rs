@@ -1,6 +1,7 @@
 //! The connect window (ConnectionView.swift): partner ID, password, recents,
 //! and "Share this screen". A small immediate-mode UI drawn with softbuffer and
-//! fontdue (TTF glyphs with antialiasing). OWNER: screen.
+//! fontdue (TTF glyphs with antialiasing); a bitmap font is the fallback when
+//! the system has no TrueType font. OWNER: screen.
 //!
 //! Keyboard: Tab / Shift+Tab move focus, Enter connects (or presses the focused
 //! button), Space presses buttons, Ctrl+V pastes. Hosting runs `linuxviewer
@@ -9,9 +10,11 @@
 
 use crate::client::ClientEvent;
 use crate::ui::UiEvent;
+use font8x8::UnicodeFonts;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -148,34 +151,132 @@ fn remember(recents: &mut Vec<String>, id: &str) {
     recents.truncate(MAX_RECENTS);
 }
 
-/// Load a system TTF font for antialiased text rendering.
-fn ui_font() -> Option<&'static fontdue::Font> {
-    static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
-    FONT.get_or_init(|| {
-        const PATHS: &[&str] = &[
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-        ];
-        for p in PATHS {
-            if let Ok(data) = std::fs::read(p) {
-                if let Ok(f) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default()) {
-                    return Some(f);
+/// Font families tried for the UI, in order of preference: (regular, bold).
+/// The first family that is installed wins, so the UI never ends up with a
+/// different typeface per machine.
+const FONT_FAMILIES: &[(&str, &str)] = &[
+    ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
+    ("NotoSans-Regular.ttf", "NotoSans-Bold.ttf"),
+    ("LiberationSans-Regular.ttf", "LiberationSans-Bold.ttf"),
+    ("Ubuntu-R.ttf", "Ubuntu-B.ttf"),
+    ("FreeSans.ttf", "FreeSansBold.ttf"),
+    ("Cantarell-Regular.ttf", "Cantarell-Bold.ttf"),
+    ("Roboto-Regular.ttf", "Roboto-Bold.ttf"),
+    ("OpenSans-Regular.ttf", "OpenSans-Bold.ttf"),
+];
+
+/// Directories that hold TrueType fonts on the usual distributions.
+fn font_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = ["/usr/share/fonts", "/usr/local/share/fonts"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local/share/fonts"));
+        dirs.push(home.join(".fonts"));
+    }
+    dirs
+}
+
+/// Every font file found in the font directories, keyed by lower-case name.
+fn font_index() -> &'static HashMap<String, PathBuf> {
+    static INDEX: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        fn walk(dir: &Path, map: &mut HashMap<String, PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, map);
+                } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    map.entry(name.to_ascii_lowercase()).or_insert_with(|| path.clone());
                 }
             }
         }
-        None
+        let mut map = HashMap::new();
+        for dir in font_dirs() {
+            walk(&dir, &mut map);
+        }
+        map
     })
-    .as_ref()
 }
 
-/// Replace punctuation a TTF might lack with ASCII look-alikes.
-fn drawable(text: &str) -> String {
+/// Find a font file by name in the font directories (searched recursively).
+fn find_font_file(name: &str) -> Option<PathBuf> {
+    font_index().get(&name.to_ascii_lowercase()).cloned()
+}
+
+/// The UI faces, loaded once: a regular face and, when the family ships one,
+/// a bold face for headings.
+struct UiFonts {
+    regular: Option<fontdue::Font>,
+    bold: Option<fontdue::Font>,
+}
+
+/// Rasterize geometry is optimized for the size the UI draws at most often;
+/// larger text stays readable instead of looking coarse.
+const FONT_SCALE: f32 = 32.0;
+
+fn load_font(file_name: &str) -> Option<fontdue::Font> {
+    let data = std::fs::read(find_font_file(file_name)?).ok()?;
+    let settings = fontdue::FontSettings { scale: FONT_SCALE, ..fontdue::FontSettings::default() };
+    fontdue::Font::from_bytes(data, settings).ok()
+}
+
+fn ui_fonts() -> &'static UiFonts {
+    static FONTS: OnceLock<UiFonts> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        for (regular, bold) in FONT_FAMILIES {
+            let Some(regular) = load_font(regular) else { continue };
+            let bold = load_font(bold);
+            return UiFonts { regular: Some(regular), bold };
+        }
+        UiFonts { regular: None, bold: None }
+    })
+}
+
+/// Text weight; bold falls back to the regular face when there is no bold one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Weight {
+    Regular,
+    Bold,
+}
+
+fn font_for(weight: Weight) -> Option<&'static fontdue::Font> {
+    let fonts = ui_fonts();
+    match weight {
+        Weight::Regular => fonts.regular.as_ref(),
+        Weight::Bold => fonts.bold.as_ref().or(fonts.regular.as_ref()),
+    }
+}
+
+/// Replace only the characters the font cannot draw with ASCII look-alikes.
+/// Characters the font does have (…, ×, •, curly quotes) keep their real
+/// shape instead of being downgraded to "..." and "x".
+fn substitute(font: &fontdue::Font, text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if font.has_glyph(c) {
+            out.push(c);
+            continue;
+        }
+        match c {
+            '…' => out.push_str("..."),
+            '’' | '‘' => out.push('\''),
+            '“' | '”' => out.push('"'),
+            '—' | '–' => out.push('-'),
+            '×' => out.push('x'),
+            '•' => out.push('*'),
+            '→' => out.push_str("->"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// ASCII look-alikes for the characters the bitmap fallback cannot draw.
+fn ascii_fallback(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -190,6 +291,11 @@ fn drawable(text: &str) -> String {
         }
     }
     out
+}
+
+/// 8x8 bitmap glyph, used when the system has no TrueType font at all.
+fn glyph(c: char) -> [u8; 8] {
+    font8x8::BASIC_FONTS.get(c).or_else(|| font8x8::LATIN_FONTS.get(c)).unwrap_or_else(|| font8x8::BASIC_FONTS.get('?').unwrap())
 }
 
 struct Canvas<'a> {
@@ -221,18 +327,36 @@ impl Canvas<'_> {
 
     /// Measure the pixel width of `text` at font size `px`.
     fn measure(&self, text: &str, px: i32) -> i32 {
-        let Some(font) = ui_font() else { return text.chars().count() as i32 * px * 5 / 8 };
+        self.measure_w(text, px, Weight::Regular)
+    }
+
+    /// Measure the pixel width of `text` at font size `px` in the given weight.
+    fn measure_w(&self, text: &str, px: i32, weight: Weight) -> i32 {
+        let Some(font) = font_for(weight) else {
+            let k = (px / 10).max(1);
+            return ascii_fallback(text).chars().count() as i32 * 8 * k;
+        };
         let px = px.max(4) as f32;
         let mut w = 0.0f32;
-        for c in drawable(text).chars() {
+        let mut prev: Option<char> = None;
+        for c in substitute(font, text).chars() {
+            if let Some(p) = prev {
+                w += font.horizontal_kern(p, c, px).unwrap_or(0.0);
+            }
             w += font.metrics(c, px).advance_width;
+            prev = Some(c);
         }
         w.ceil() as i32
     }
 
     /// Draw antialiased text at pixel size `px`; returns its width.
     fn text(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32) -> i32 {
-        let Some(font) = ui_font() else { return 0 };
+        self.text_w(x, y, text, color, px, Weight::Regular)
+    }
+
+    /// Draw antialiased text in the given weight; returns its width.
+    fn text_w(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32, weight: Weight) -> i32 {
+        let Some(font) = font_for(weight) else { return self.text_bitmap(x, y, text, color, px) };
         let px = px.max(4) as f32;
         let line = match font.horizontal_line_metrics(px) {
             Some(m) => m,
@@ -245,7 +369,11 @@ impl Canvas<'_> {
             (color & 0xff) as f32,
         );
         let mut pen = x as f32;
-        for ch in drawable(text).chars() {
+        let mut prev: Option<char> = None;
+        for ch in substitute(font, text).chars() {
+            if let Some(p) = prev {
+                pen += font.horizontal_kern(p, ch, px).unwrap_or(0.0);
+            }
             let (m, bitmap) = font.rasterize(ch, px);
             let (gw, gh) = (m.width, m.height);
             let gx = (pen + m.xmin as f32).round() as i32;
@@ -275,13 +403,37 @@ impl Canvas<'_> {
                 }
             }
             pen += m.advance_width;
+            prev = Some(ch);
         }
         (pen - x as f32).round() as i32
     }
 
-    /// Text clipped to `max_w` pixels with a trailing "...".
+    /// Fallback renderer for systems without any TrueType font: the 8x8 bitmap
+    /// font keeps the window readable instead of drawing nothing.
+    fn text_bitmap(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32) -> i32 {
+        let k = (px / 10).max(1);
+        let mut cx = x;
+        for c in ascii_fallback(text).chars() {
+            let g = glyph(c);
+            for (row, bits) in g.iter().enumerate() {
+                for col in 0..8 {
+                    // The most significant bit is the leftmost pixel.
+                    if bits & (1 << (7 - col)) != 0 {
+                        self.fill(Rect { x: cx + col * k, y: y + row as i32 * k, w: k, h: k }, color);
+                    }
+                }
+            }
+            cx += 8 * k;
+        }
+        cx - x
+    }
+
+    /// Text clipped to `max_w` pixels with a trailing ellipsis.
     fn fit(&self, text: &str, max_w: i32, px: i32) -> String {
-        let text = drawable(text);
+        let text = match font_for(Weight::Regular) {
+            Some(font) => substitute(font, text),
+            None => text.to_string(),
+        };
         if self.measure(&text, px) <= max_w {
             return text;
         }
@@ -675,7 +827,7 @@ impl Launcher {
         let focus = self.focus;
 
         let mut y = pad;
-        c.text(x, y, "LinuxViewer", TEXT, kh);
+        c.text_w(x, y, "LinuxViewer", TEXT, kh, Weight::Bold);
         y += 18 * s;
 
         // Connect section
@@ -683,7 +835,7 @@ impl Launcher {
         y += line + 2 * s;
         for (label, widget, value) in [("Partner ID", Widget::Id, group_id(&self.id)),
                                        ("Password", Widget::Password, "*".repeat(self.password.chars().count()))] {
-            c.text(x, y, label, TEXT, k);
+            c.text_w(x, y, label, TEXT, k, Weight::Bold);
             y += line;
             let r = Rect { x, y, w: width, h: field_h };
             c.fill(r, FIELD);
@@ -723,7 +875,7 @@ impl Launcher {
         y += line + 4 * s;
 
         if !self.recents.is_empty() {
-            c.text(x, y, "Recent", TEXT, k);
+            c.text_w(x, y, "Recent", TEXT, k, Weight::Bold);
             y += line;
             for (i, id) in self.recents.iter().enumerate() {
                 if y + line > c.h - 60 * s {
@@ -743,7 +895,7 @@ impl Launcher {
         // Share section
         c.fill(Rect { x, y, w: width, h: (s / 2).max(1) }, BORDER);
         y += 6 * s;
-        c.text(x, y, "Share this screen", TEXT, k);
+        c.text_w(x, y, "Share this screen", TEXT, k, Weight::Bold);
         y += line + 2 * s;
         match &self.host {
             None => {
@@ -840,5 +992,37 @@ mod tests {
         let fitted = c.fit("abcdefghijklmnop", 50, 14);
         assert!(fitted.ends_with("..."));
         assert!(c.measure("Hello", 14) > c.measure("Hi", 14));
+    }
+
+    #[test]
+    fn substitution_keeps_glyphs_the_font_provides() {
+        let Some(font) = font_for(Weight::Regular) else { return };
+        if font.has_glyph('×') {
+            assert_eq!(substitute(font, "1920×1080"), "1920×1080");
+        }
+        if font.has_glyph('…') {
+            assert_eq!(substitute(font, "wait…"), "wait…");
+        }
+        // A character no font has is replaced by an ASCII look-alike.
+        if !font.has_glyph('…') {
+            assert_eq!(substitute(font, "wait…"), "wait...");
+        }
+    }
+
+    #[test]
+    fn bitmap_fallback_keeps_text_visible() {
+        let mut buf = vec![0u32; 200 * 40];
+        let mut c = Canvas { buf: &mut buf, w: 200, h: 40, s: 1 };
+        let w = c.text_bitmap(0, 0, "Hi", 0x0020_2124, 14);
+        assert!(w > 0);
+        assert!(c.buf.iter().any(|p| *p != 0));
+    }
+
+    #[test]
+    fn bold_falls_back_to_the_regular_face() {
+        let Some(font) = font_for(Weight::Regular) else { return };
+        let bold = font_for(Weight::Bold).expect("bold falls back to regular");
+        assert!(bold.metrics('A', 20.0).advance_width > 0.0);
+        assert!(font.metrics('A', 20.0).advance_width > 0.0);
     }
 }
