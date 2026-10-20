@@ -1245,6 +1245,12 @@ impl Shell {
             }
             LauncherAction::Connect { id, password } => {
                 if self.viewer.is_some() {
+                    // The previous session is still being closed. Hand the
+                    // button back to the launcher instead of leaving it
+                    // disabled forever.
+                    if let Some(l) = self.launcher.as_mut() {
+                        l.session_ended(Some("The previous session is still closing.".into()));
+                    }
                     return;
                 }
                 let profile = match Profile::load_or_create() {
