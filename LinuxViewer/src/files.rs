@@ -608,7 +608,8 @@ mod tests {
             let accepted = receiver.accept(&offer.transfer_id, &dst).unwrap();
             let rrole = if role == Role::Viewer { Role::Host } else { Role::Viewer };
             let first = sender.consume(through_wire(&accepted.messages[0], rrole));
-            assert_eq!(first.messages.len(), 2);
+            let chunks = bytes.len().div_ceil(MAX_PART);
+            assert_eq!(first.messages.len(), chunks.min(PARTS_IN_FLIGHT));
             let mut queue: Vec<(bool, Message)> = first.messages.into_iter().map(|m| (true, m)).collect();
             let (mut s_done, mut r_done, mut max_part, mut n) = (false, false, 0, 0);
             while !queue.is_empty() {
@@ -686,12 +687,14 @@ mod tests {
         assert_eq!(fs::read_to_string(&recv).unwrap(), "mine");
 
         let src = dir.join("source");
-        fs::write(&src, vec![0u8; 200_000]).unwrap();
+        // More chunks than fit in the window, so the rest waits for an
+        // acknowledgment.
+        fs::write(&src, vec![0u8; 400_000]).unwrap();
         let mut s = Engine::default();
         let (o, _) = s.offer_file(&src).unwrap();
         let id = o.transfer_id.clone();
         assert!(s.consume(Message::Ack(id.clone())).messages.is_empty());
-        assert_eq!(s.consume(Message::Accept { id: id.clone(), offset: 1 }).messages.len(), 2);
+        assert_eq!(s.consume(Message::Accept { id: id.clone(), offset: 1 }).messages.len(), PARTS_IN_FLIGHT);
         assert!(s.consume(Message::Accept { id: id.clone(), offset: 1 }).messages.is_empty());
         let next = s.consume(Message::Ack(id.clone()));
         assert_eq!((next.messages.len(), next.events), (1, vec![Event::Progress(id, 32_000)]));
