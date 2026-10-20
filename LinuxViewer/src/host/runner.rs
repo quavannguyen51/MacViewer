@@ -296,8 +296,10 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
         if in_flight.is_none() && core.take_capture_due(now) {
             request_capture(Purpose::Stream, &mut in_flight, selection);
         }
-        if core.awaiting_approval() && in_flight.is_none() {
-            if let (Some(control), true) = (opts.auto_approve, core.out.iter().any(|a| matches!(a, Action::Prompt(_)))) {
+        // Auto approval needs the first frame, like the manual answer does.
+        if in_flight.is_none() && core.needs_approval_frame() {
+            if let Some(control) = opts.auto_approve {
+                core.mark_approval_frame();
                 request_capture(Purpose::Approve { control }, &mut in_flight, selection);
             }
         }

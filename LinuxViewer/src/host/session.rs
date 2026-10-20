@@ -121,6 +121,8 @@ pub struct Core {
     /// Compress the screen with the trained dictionary the Windows desktop
     /// loads as well.
     dictionary: bool,
+    /// The frame for the pending approval was already requested.
+    approval_requested: bool,
     pub frames_sent: u64,
     pub out: Vec<Action>,
 }
@@ -144,7 +146,7 @@ impl Core {
         Core {
             password: password.into(), custom_proof, throttle: Throttle::default(), peer: None, phase: Phase::None, tools_connected: false,
             control: false, pending_frame: None, last_frame: None, next_seq: FIRST_FRAME_NUMBER, frames_in_flight: 0,
-            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, frames_sent: 0, out: Vec::new(),
+            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, approval_requested: false, frames_sent: 0, out: Vec::new(),
         }
     }
 
@@ -166,6 +168,17 @@ impl Core {
     /// Compress the screen with the trained dictionary or without it.
     pub fn set_dictionary(&mut self, on: bool) {
         self.dictionary = on;
+    }
+
+    /// True while a connection waits for the local approval and the frame
+    /// for that approval has not been requested yet.
+    pub fn needs_approval_frame(&self) -> bool {
+        self.phase == Phase::Approval && !self.approval_requested
+    }
+
+    /// Remember that the frame for the approval was requested.
+    pub fn mark_approval_frame(&mut self) {
+        self.approval_requested = true;
     }
 
     /// Route of the viewer that may use chat/clipboard/files.
@@ -261,6 +274,7 @@ impl Core {
         let request = Request { viewer_id: login.claimed_id().into(), display_name: (!name.is_empty()).then_some(name) };
         self.peer = Some(Peer { request: request.clone(), login, route });
         self.phase = Phase::Approval;
+        self.approval_requested = false;
         self.deadline = Some(now + Duration::from_secs(45));
         self.out.push(Action::Prompt(request));
         Ok(())
@@ -388,6 +402,7 @@ impl Core {
         self.frames_in_flight = 0;
         self.capture_at = None;
         self.deadline = None;
+        self.approval_requested = false;
         self.pending_frame = None;
         self.last_frame = None;
         self.out.push(Action::ReleaseInput);
