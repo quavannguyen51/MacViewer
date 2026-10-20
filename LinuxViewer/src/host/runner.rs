@@ -32,13 +32,15 @@ fn spawn_encoder(events: mpsc::Sender<Event>, dictionary: bool) -> mpsc::Sender<
         while let Ok(job) = incoming.recv() {
             let EncodeJob::Frame { route, sequence, payload } = job;
             let dict = dictionary.then_some(crate::screen::SCREEN_DICTIONARY);
+            let started = std::time::Instant::now();
             let data = match payload {
                 FramePayload::Full(frame) => encode::full_frame_with(&frame, sequence, encode::Compression::Zstandard, dict),
                 FramePayload::Delta(delta) => encode::compress_delta(&delta, sequence, dict),
             };
+            let took = started.elapsed().as_millis() as u64;
             match data {
                 Ok(bytes) => {
-                    if events.send(Event::Encoded(route, bytes)).is_err() {
+                    if events.send(Event::Encoded(route, bytes, took)).is_err() {
                         return;
                     }
                 }
@@ -60,8 +62,9 @@ pub(crate) enum Event {
     Line(String),
     StdinClosed,
     Captured(u64, Result<Frame>),
-    /// A screen frame that the encoder thread compressed.
-    Encoded(Route, Vec<u8>),
+    /// A screen frame that the encoder thread compressed, and how long that
+    /// took in milliseconds.
+    Encoded(Route, Vec<u8>, u64),
     Interrupt,
     /// The clipboard watcher has new local text for the viewer.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -178,6 +181,10 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
     let mut stopping = false;
     let mut last_frames_shown = 0u64;
     let mut last_frame_bytes = 0usize;
+    let mut capture_started = std::time::Instant::now();
+    let mut capture_ms = 0u64;
+    let mut compare_ms = 0u64;
+    let mut encode_ms = 0u64;
 
     loop {
         let now = Instant::now();
@@ -267,11 +274,12 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
                         core.end_viewer(&format!("The incoming relay disconnected: {e}"));
                     }
                 }
-                Event::Encoded(route, bytes) => {
+                Event::Encoded(route, bytes, took) => {
                 if let Some(w) = relay.as_ref().and_then(|r| r.writer.as_ref()) {
                     send_peer(w, route, &bytes);
                 }
                 last_frame_bytes = bytes.len();
+                encode_ms = took;
             }
             Event::Captured(t, result) => {
                     // Hand the input that already arrived to the desktop before
@@ -281,7 +289,12 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
                         in_flight = None;
                         match (purpose, result) {
                             (Purpose::Approve { control }, Ok(frame)) if core.awaiting_approval() => core.approve(frame, control, now)?,
-                            (Purpose::Stream, Ok(frame)) => core.submit_frame(frame, now)?,
+                            (Purpose::Stream, Ok(frame)) => {
+                                let started = std::time::Instant::now();
+                                core.submit_frame(frame, now)?;
+                                compare_ms = started.elapsed().as_millis() as u64;
+                                capture_ms = capture_started.elapsed().as_millis() as u64;
+                            }
                             (_, Err(e)) if core.has_viewer() => {
                                 core.end_viewer(&format!("Screen capture failed: {e}"));
                                 if selection != Selection::All {
@@ -351,9 +364,14 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
         // Show how much the last frame cost, so the delta is visible.
         if core.frames_sent != last_frames_shown {
             last_frames_shown = core.frames_sent;
-            eprintln!("Frame {}: {:.1} KB", core.frames_sent, last_frame_bytes as f64 / 1024.0);
+            eprintln!(
+                "Frame {}: {:.1} KB (capture {capture_ms} ms, compare {compare_ms} ms, compress {encode_ms} ms)",
+                core.frames_sent,
+                last_frame_bytes as f64 / 1024.0
+            );
         }
         if in_flight.is_none() && core.take_capture_due(now) {
+            capture_started = std::time::Instant::now();
             request_capture(Purpose::Stream, &mut in_flight, selection);
         }
         // Auto approval needs the first frame, like the manual answer does.
