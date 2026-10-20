@@ -96,8 +96,8 @@ impl Options {
 /// How many frames may be on the wire at the same time.
 fn parse_frames(value: &str) -> Result<u32> {
     let n: u32 = value.trim().parse().map_err(|_| format!("--frames takes a number, not {value:?}"))?;
-    if !(1..=super::session::MAX_FRAMES_IN_FLIGHT).contains(&n) {
-        return Err(format!("--frames takes 1 to {}", super::session::MAX_FRAMES_IN_FLIGHT).into());
+    if !(1..=session::MAX_FRAMES_IN_FLIGHT).contains(&n) {
+        return Err(format!("--frames takes 1 to {}", session::MAX_FRAMES_IN_FLIGHT).into());
     }
     Ok(n)
 }
