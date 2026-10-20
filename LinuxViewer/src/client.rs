@@ -89,6 +89,13 @@ impl std::ops::Deref for ClientSession {
     }
 }
 
+impl ClientSession {
+    /// A clone of the session handle, for a thread that outlives the window.
+    pub fn handle(&self) -> SessionHandle {
+        self.handle.clone()
+    }
+}
+
 #[derive(Default)]
 struct Shared {
     peer: Mutex<Option<PeerLink>>,
