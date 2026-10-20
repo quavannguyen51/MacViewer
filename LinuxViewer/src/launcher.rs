@@ -247,16 +247,16 @@ impl Canvas<'_> {
         let mut pen = x as f32;
         for ch in drawable(text).chars() {
             let (m, bitmap) = font.rasterize(ch, px);
-            let (gw, gh) = (m.width as i32, m.height as i32);
+            let (gw, gh) = (m.width, m.height);
             let gx = (pen + m.xmin as f32).round() as i32;
             let gy = (baseline - m.ymin as f32 - gh as f32).round() as i32;
             for row in 0..gh {
                 for col in 0..gw {
-                    let cov = bitmap[(row * m.width + col) as usize];
+                    let cov = bitmap[row * gw + col];
                     if cov == 0 {
                         continue;
                     }
-                    let (pxx, pyy) = (gx + col, gy + row);
+                    let (pxx, pyy) = (gx + col as i32, gy + row as i32);
                     if pxx < 0 || pyy < 0 || pxx >= self.w || pyy >= self.h {
                         continue;
                     }
