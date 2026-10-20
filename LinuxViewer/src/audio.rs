@@ -4,6 +4,7 @@
 //! ThirdParty/g722, with NAudio's wrapping (not saturating) final QMF output.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const MAX_ENCODED_PACKET: usize = 64 * 1024;
@@ -232,11 +233,15 @@ impl G722Decoder {
 /// Keeps at most 250 ms queued, dropping the oldest audio beyond that.
 pub struct Player {
     queue: Arc<Mutex<VecDeque<i16>>>,
+    /// The output volume, 0.0 to 1.0, as f32 bits.
+    volume: Arc<AtomicU32>,
     _stream: cpal::Stream,
 }
 
 const SOURCE_RATE: u32 = 48_000;
 const MAX_QUEUED: usize = 12_000 * 2;
+/// The volume steps the user can pick.
+pub const VOLUME_LEVELS: [f32; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 
 impl Player {
     pub fn new() -> Result<Self, String> {
@@ -248,25 +253,40 @@ impl Player {
         let rate = config.sample_rate().0;
         let queue: Arc<Mutex<VecDeque<i16>>> = Arc::default();
         let q = queue.clone();
-        // Nearest-sample resampling from 48 kHz stereo to the device format.
-        let mut phase = 0f64;
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let gain = volume.clone();
+        // Linear resampling from 48 kHz stereo to the device format: the
+        // samples around the position are mixed, so the sound is not stepped.
+        let mut frac = 0f64;
         let step = SOURCE_RATE as f64 / rate as f64;
-        let mut frame = [0i16; 2];
+        let mut current = [0i16; 2];
+        let mut following = [0i16; 2];
         let mut fill = move |out: &mut dyn FnMut(usize, f32), frames: usize| {
             let mut q = q.lock().unwrap();
+            let level = f32::from_bits(gain.load(Ordering::Relaxed));
             for f in 0..frames {
-                phase += step;
-                while phase >= 1.0 {
-                    phase -= 1.0;
-                    if q.len() >= 2 {
-                        frame = [q.pop_front().unwrap(), q.pop_front().unwrap()];
+                frac += step;
+                while frac >= 1.0 {
+                    frac -= 1.0;
+                    current = following;
+                    // With nothing left the last sample is held, so a gap in
+                    // the stream does not click.
+                    following = if q.len() >= 2 {
+                        [q.pop_front().unwrap(), q.pop_front().unwrap()]
                     } else {
-                        frame = [0, 0];
-                    }
+                        current
+                    };
                 }
                 for c in 0..channels {
-                    let s = if channels == 1 { (frame[0] as f32 + frame[1] as f32) / 2.0 } else { frame[c.min(1)] as f32 };
-                    out(f * channels + c, s / 32768.0);
+                    let (a, b) = if channels == 1 {
+                        // Mono: mix the two channels of both samples.
+                        ((current[0] as f32 + current[1] as f32) / 2.0,
+                         (following[0] as f32 + following[1] as f32) / 2.0)
+                    } else {
+                        (current[c] as f32, following[c] as f32)
+                    };
+                    let s = a + (b - a) * frac as f32;
+                    out(f * channels + c, s / 32768.0 * level);
                 }
             }
         };
@@ -288,7 +308,7 @@ impl Player {
             f => return Err(format!("Unsupported audio output format {f:?}.")),
         }.map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok(Player { queue, _stream: stream })
+        Ok(Player { queue, volume, _stream: stream })
     }
 
     pub fn play(&self, samples: &[i16]) {
@@ -297,6 +317,16 @@ impl Player {
         while q.len() > MAX_QUEUED {
             q.pop_front();
         }
+    }
+
+    /// The output volume, 0.0 to 1.0.
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    /// Set the output volume, 0.0 to 1.0.
+    pub fn set_volume(&self, volume: f32) {
+        self.volume.store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 }
 

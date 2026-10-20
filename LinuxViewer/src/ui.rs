@@ -225,6 +225,8 @@ struct App {
     clipboard_watch: Option<ClipboardWatch>,
     /// The buttons of the overlay toolbar and where they are.
     toolbar: Vec<ToolbarButton>,
+    /// The sound volume, as a step of `audio::VOLUME_LEVELS`.
+    volume_step: usize,
 }
 
 /// How often the local clipboard is checked for a change.
@@ -404,7 +406,7 @@ impl App {
         if self.encoder.is_some() {
             title += if self.view_only { " — view only" } else if self.control { " — Control ON" } else { " — Control OFF" };
             if self.sound {
-                title += " — Sound ON";
+                title += &format!(" — Sound ON {}%", (self.volume() * 100.0).round() as i32);
             }
             if self.clipboard_sharing {
                 title += " — Clipboard ON";
@@ -486,7 +488,10 @@ impl App {
     fn set_sound(&mut self, on: bool) {
         if on {
             match Player::new() {
-                Ok(p) => self.player = Some(p),
+                Ok(p) => {
+                    p.set_volume(self.volume());
+                    self.player = Some(p);
+                }
                 Err(e) => {
                     self.notify(format!("Sound unavailable: {e}"));
                     return;
@@ -668,6 +673,7 @@ impl App {
 enum ToolbarAction {
     Control,
     Sound,
+    Volume,
     Clipboard,
     Chat,
     File,
@@ -690,6 +696,7 @@ fn toolbar_buttons(control: bool, sound: bool, clipboard: bool) -> Vec<(ToolbarA
     vec![
         (ToolbarAction::Control, "Control", control),
         (ToolbarAction::Sound, "Sound", sound),
+        (ToolbarAction::Volume, "Vol", false),
         (ToolbarAction::Clipboard, "Clipboard", clipboard),
         (ToolbarAction::Chat, "Chat", false),
         (ToolbarAction::File, "File", false),
@@ -759,6 +766,22 @@ impl App {
         }
     }
 
+    /// The sound volume, 0.0 to 1.0.
+    fn volume(&self) -> f32 {
+        audio::VOLUME_LEVELS[self.volume_step]
+    }
+
+    /// The next volume step, applied to the running player.
+    fn cycle_volume(&mut self) {
+        self.volume_step = (self.volume_step + 1) % audio::VOLUME_LEVELS.len();
+        let volume = self.volume();
+        if let Some(p) = &self.player {
+            p.set_volume(volume);
+        }
+        self.update_title();
+        self.notify(format!("Volume {}%", (volume * 100.0).round() as i32));
+    }
+
     /// Run a toolbar button.
     fn toolbar_action(&mut self, action: ToolbarAction) {
         match action {
@@ -770,6 +793,7 @@ impl App {
                 let on = !self.sound;
                 self.set_sound(on);
             }
+            ToolbarAction::Volume => self.cycle_volume(),
             ToolbarAction::Clipboard => {
                 let on = !self.clipboard_sharing;
                 self.set_clipboard_sharing(on);
@@ -1139,7 +1163,8 @@ impl App {
                     return;
                 }
                 let ctrl_alt_c = code == KeyCode::KeyC && self.modifiers.control_key() && self.modifiers.alt_key();
-                let local = matches!(code, KeyCode::F6 | KeyCode::F7 | KeyCode::F8 | KeyCode::F9 | KeyCode::F10 | KeyCode::F11 | KeyCode::F12) || ctrl_alt_c;
+                let local = matches!(code, KeyCode::F3 | KeyCode::F4 | KeyCode::F6 | KeyCode::F7 | KeyCode::F8
+                    | KeyCode::F9 | KeyCode::F10 | KeyCode::F11 | KeyCode::F12) || ctrl_alt_c;
                 if local {
                     if !pressed || event.repeat || self.encoder.is_none() && code != KeyCode::F10 {
                         return;
@@ -1164,6 +1189,16 @@ impl App {
                             let on = !self.sound;
                             self.set_sound(on);
                         }
+                        KeyCode::F3 => {
+                            self.volume_step = (self.volume_step + audio::VOLUME_LEVELS.len() - 1) % audio::VOLUME_LEVELS.len();
+                            let volume = self.volume();
+                            if let Some(p) = &self.player {
+                                p.set_volume(volume);
+                            }
+                            self.update_title();
+                            self.notify(format!("Volume {}%", (volume * 100.0).round() as i32));
+                        }
+                        KeyCode::F4 => self.cycle_volume(),
                         _ => {
                             if ctrl_alt_c {
                                 // Ctrl/Alt went down remotely; let them go first.
@@ -1236,7 +1271,7 @@ fn new_viewer(profile: Profile, partner_id: &str, password: &str, base: ConnectO
     App {
         session: None, pending: Some((profile, password.to_string())), proxy: Some(proxy), generation, done: false,
         clipboard: None, clipboard_sharing: false, clipboard_sharing_flag: Arc::new(AtomicBool::new(false)),
-        clipboard_watch: None, toolbar: Vec::new(),
+        clipboard_watch: None, toolbar: Vec::new(), volume_step: 4,
         transfers: HashMap::new(),
         download_dir: base.download_dir.clone().unwrap_or(if downloads.is_dir() { downloads } else { home }),
         clipboard_at_start: base.clipboard, base,
