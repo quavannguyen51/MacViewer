@@ -37,14 +37,45 @@ impl PixelFormat {
 }
 
 /// Top 5 bits of the channel selected by `mask`.
-fn channel5(pixel: u32, mask: u32) -> u16 {
-    if mask == 0 {
-        return 0;
+/// One color channel of the X11 pixel format, ready to be used: the shifts
+/// are worked out once instead of for every pixel.
+#[derive(Clone, Copy)]
+struct Channel {
+    /// How much the pixel is shifted to bring the channel into place.
+    shift: u32,
+    /// The bits of the channel after the shift.
+    mask: u32,
+    /// How much the value is shifted again to make five bits.
+    adjust: u32,
+    /// The value is shifted to the left instead of to the right.
+    up: bool,
+    empty: bool,
+}
+
+impl Channel {
+    fn new(mask: u32) -> Channel {
+        if mask == 0 {
+            return Channel { shift: 0, mask: 0, adjust: 0, up: false, empty: true };
+        }
+        let shift = mask.trailing_zeros();
+        let bits = (mask >> shift).count_ones();
+        if bits >= 5 {
+            // Take the top five bits of the channel.
+            Channel { shift: shift + bits - 5, mask: 0x1f, adjust: 0, up: false, empty: false }
+        } else {
+            // Fewer than five bits: spread them over the whole channel.
+            Channel { shift, mask: (1 << bits) - 1, adjust: 5 - bits, up: true, empty: false }
+        }
     }
-    let shift = mask.trailing_zeros();
-    let bits = (mask >> shift).count_ones();
-    let v = (pixel & mask) >> shift;
-    if bits >= 5 { (v >> (bits - 5)) as u16 } else { (v << (5 - bits)) as u16 }
+
+    #[inline(always)]
+    fn value(self, pixel: u32) -> u16 {
+        if self.empty {
+            return 0;
+        }
+        let v = (pixel >> self.shift) & self.mask;
+        if self.up { (v << self.adjust) as u16 } else { v as u16 }
+    }
 }
 
 /// Converts top-down ZPixmap rows to RGB555 and appends them bottom-up to `out`
@@ -59,9 +90,13 @@ pub fn zpixmap_to_rgb555(data: &[u8], width: usize, rows: usize, f: &PixelFormat
         return Err("X11 returned a short image".into());
     }
     let bytes = bpp / 8;
+    let (red, green, blue) = (Channel::new(f.red_mask), Channel::new(f.green_mask), Channel::new(f.blue_mask));
     for y in (0..rows).rev() {
         let row = &data[y * stride..y * stride + width * bytes];
-        for px in row.chunks_exact(bytes) {
+        let start = out.len();
+        out.resize(start + width * 2, 0);
+        let target = &mut out[start..];
+        for (px, slot) in row.chunks_exact(bytes).zip(target.chunks_exact_mut(2)) {
             let p = match (bytes, f.msb_first) {
                 (4, false) => u32::from_le_bytes([px[0], px[1], px[2], px[3]]),
                 (4, true) => u32::from_be_bytes([px[0], px[1], px[2], px[3]]),
@@ -70,8 +105,8 @@ pub fn zpixmap_to_rgb555(data: &[u8], width: usize, rows: usize, f: &PixelFormat
                 (_, false) => u16::from_le_bytes([px[0], px[1]]) as u32,
                 (_, true) => u16::from_be_bytes([px[0], px[1]]) as u32,
             };
-            let w = (channel5(p, f.red_mask) << 10) | (channel5(p, f.green_mask) << 5) | channel5(p, f.blue_mask);
-            out.extend_from_slice(&w.to_le_bytes());
+            let w = (red.value(p) << 10) | (green.value(p) << 5) | blue.value(p);
+            slot.copy_from_slice(&w.to_le_bytes());
         }
     }
     Ok(())
