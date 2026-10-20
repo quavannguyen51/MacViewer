@@ -7,6 +7,7 @@ use linuxviewer::wire::Result;
 const USAGE: &str = "usage:
   linuxviewer [gui]                         open the connect window (connect, recents, share this screen)
   linuxviewer connect <ID> [--password P] [--clipboard] [--download-dir D] [--headless] [--no-lan]
+                   [--send-file PATH]
                                             view and control a remote computer; lines typed in
                                             the terminal are sent as chat, /send <path> sends a file
   linuxviewer snapshot <ID> --password P -o out.png [--frames N] [--timeout S] [--no-lan]
@@ -51,9 +52,10 @@ fn run(args: &[String]) -> Result<()> {
             if !download_dir.is_dir() {
                 return Err(format!("{} is not a folder.", download_dir.display()).into());
             }
+            let send_files = files_option(args, "--send-file")?;
             let options = linuxviewer::client::ConnectOptions {
                 download_dir: Some(download_dir), clipboard: flag("--clipboard"), console: true,
-                no_lan_direct: flag("--no-lan"), ..Default::default()
+                no_lan_direct: flag("--no-lan"), send_files, ..Default::default()
             };
             if flag("--headless") {
                 return headless(&id, &password, options);
@@ -129,6 +131,26 @@ fn headless(id: &str, password: &str, mut options: linuxviewer::client::ConnectO
 
 fn option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
+
+/// Every value of a repeatable option, for example `--send-file a --send-file b`.
+fn files_option(args: &[String], name: &str) -> Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == name {
+            let value = args.get(i + 1).ok_or_else(|| format!("{name} needs a value"))?;
+            let path = std::path::PathBuf::from(value);
+            if !path.is_file() {
+                return Err(format!("{} is not a file.", path.display()).into());
+            }
+            out.push(path);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(out)
 }
 
 /// Headless smoke test: connect, wait for init plus N frames, save a PNG.

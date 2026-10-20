@@ -44,11 +44,18 @@ The binary is `target/release/linuxviewer`.
 ```sh
 linuxviewer connect 123456789          # asks for the password
 linuxviewer connect 123456789 --password 1234
+linuxviewer connect 123456789 --password 1234 --send-file ~/movie.mp4
 linuxviewer host                       # share this X11 or Wayland desktop
 linuxviewer host --pacing 0            # send frames as fast as the viewer allows
 linuxviewer id [--host]                # register and print this machine's ID/password
 linuxviewer master-password [--clear]  # set a fixed password for hosting
 ```
+
+`--send-file PATH` sends a file to the partner as soon as the session is up
+(the flag can be repeated). In the window you can also drop a file on the
+remote screen, or use the **File** button of the toolbar, which opens the
+desktop's own file chooser. A file the partner sends to this computer is
+saved in the download folder (`~/Downloads`).
 
 `--pacing MS` sets how long the host waits between frames while hosting
 (default 40 ms, the UltraViewer default; 0 means "as fast as the viewer

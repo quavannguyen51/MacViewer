@@ -670,6 +670,7 @@ enum ToolbarAction {
     Sound,
     Clipboard,
     Chat,
+    File,
     Zoom,
     Monitor,
     Help,
@@ -691,6 +692,7 @@ fn toolbar_buttons(control: bool, sound: bool, clipboard: bool) -> Vec<(ToolbarA
         (ToolbarAction::Sound, "Sound", sound),
         (ToolbarAction::Clipboard, "Clipboard", clipboard),
         (ToolbarAction::Chat, "Chat", false),
+        (ToolbarAction::File, "File", false),
         (ToolbarAction::Zoom, "Zoom", false),
         (ToolbarAction::Monitor, "Monitor", false),
         (ToolbarAction::Help, "Help", false),
@@ -734,6 +736,29 @@ impl App {
         self.toolbar.iter().find(|b| b.rect.contains(x, y)).map(|b| b.action)
     }
 
+    /// Ask for a file with the desktop's own picker and send it to the
+    /// partner. Works without dragging a file into the window.
+    fn pick_and_send_file(&mut self) {
+        let Some(proxy) = self.proxy.clone() else { return };
+        let generation = self.generation;
+        std::thread::spawn(move || {
+            let Some(path) = pick_file() else { return };
+            let _ = proxy.send_event(UiEvent::SendFile(generation, path));
+        });
+    }
+
+    /// Send a file to the partner.
+    fn send_file(&mut self, path: std::path::PathBuf) {
+        let Some(s) = &self.session else { return };
+        match s.send_file(&path) {
+            Ok(o) => {
+                self.transfers.insert(o.transfer_id.clone(), o.file_name.clone());
+                self.notify(format!("Offering {}", o.file_name));
+            }
+            Err(e) => self.notify(format!("Could not send {}: {e}", path.display())),
+        }
+    }
+
     /// Run a toolbar button.
     fn toolbar_action(&mut self, action: ToolbarAction) {
         match action {
@@ -756,11 +781,37 @@ impl App {
                 self.command(t.payload, t.format_flag);
                 self.update_title();
             }
+            ToolbarAction::File => self.pick_and_send_file(),
             ToolbarAction::Zoom => self.cycle_zoom(),
             ToolbarAction::Monitor => self.cycle_monitor(),
             ToolbarAction::Help => self.notify(HELP),
         }
     }
+}
+
+/// Ask the desktop for a file with whatever file chooser is installed.
+fn pick_file() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("."));
+    let candidates: [(&str, &[&str]); 3] = [
+        ("zenity", &["zenity", "--file-selection", "--title=Send a file to the partner"]),
+        ("kdialog", &["kdialog", "--getopenfilename", ".", "Send a file to the partner"]),
+        ("qarma", &["qarma", "--file-selection", "--title=Send a file to the partner"]),
+    ];
+    for (program, args) in candidates {
+        let Ok(out) = std::process::Command::new(program).args(args).current_dir(&home).output() else { continue };
+        if !out.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        let path = std::path::PathBuf::from(text);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn rgba(img: &CursorImage) -> Vec<u8> {
@@ -1203,6 +1254,8 @@ fn new_viewer(profile: Profile, partner_id: &str, password: &str, base: ConnectO
 pub enum UiEvent {
     Client(u64, ClientEvent),
     Host(u64, HostLine),
+    /// A file the user picked with the desktop file chooser.
+    SendFile(u64, std::path::PathBuf),
 }
 
 /// Owns the event loop's windows: the optional launcher and at most one viewer.
@@ -1301,6 +1354,11 @@ impl ApplicationHandler<UiEvent> for Shell {
             UiEvent::Host(generation, line) => {
                 if let Some(l) = self.launcher.as_mut() {
                     l.host_line(generation, line);
+                }
+            }
+            UiEvent::SendFile(generation, path) => {
+                if let Some(v) = self.viewer.as_mut().filter(|v| v.generation == generation) {
+                    v.send_file(path);
                 }
             }
         }

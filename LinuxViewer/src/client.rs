@@ -47,6 +47,8 @@ pub struct ConnectOptions {
     pub chat_on_stdout: bool,
     /// Do not offer the encrypted LAN-direct channel (relay only).
     pub no_lan_direct: bool,
+    /// Files to offer to the partner as soon as the session is up.
+    pub send_files: Vec<std::path::PathBuf>,
 }
 
 pub enum ClientEvent {
@@ -913,8 +915,30 @@ impl Run {
             self.accepted = true;
             // RemoteControlCommands.cursorPositions(enabled: true).
             self.shared.send_peer(b"28|||1")?;
+            self.send_queued_files();
         }
         Ok(())
+    }
+
+    /// Offer the files the user asked for, now that the peer is connected.
+    fn send_queued_files(&mut self) {
+        for path in std::mem::take(&mut self.options.send_files) {
+            let mut engine = self.shared.files.lock().unwrap();
+            match engine.offer_file(&path) {
+                Ok((offer, update)) => {
+                    drop(engine);
+                    let _ = self.shared.send_file_messages(&update.messages);
+                    (self.notify)(ClientEvent::File(files::Event::Offer(offer)));
+                }
+                Err(e) => {
+                    drop(engine);
+                    (self.notify)(ClientEvent::File(files::Event::Failed(
+                        path.display().to_string(),
+                        e.to_string(),
+                    )));
+                }
+            }
+        }
     }
 
     fn frame(&mut self, parts: &[&[u8]]) -> Result<()> {
