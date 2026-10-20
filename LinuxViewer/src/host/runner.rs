@@ -172,6 +172,10 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
         if opts.dictionary { "with the trained dictionary" } else { "without the dictionary" }
     );
     core.set_dictionary(opts.dictionary);
+    if let Some(frames) = opts.frames {
+        core.set_frames_in_flight(frames);
+    }
+    eprintln!("Frames in flight: {}.", core.frames_in_flight_max());
     let mut relay: Option<Relay> = None;
     let mut relay_generation = 0u64;
     let mut next_keepalive = Instant::now() + Duration::from_secs(60);

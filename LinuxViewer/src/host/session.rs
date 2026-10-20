@@ -13,7 +13,9 @@ const HOST_VERSION: &str = "6.6.133";
 
 /// Frames that may be on the wire at the same time. Two is enough to hide a
 /// round trip without queueing stale frames on a slow link.
-pub const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+pub const MAX_FRAMES_IN_FLIGHT: u32 = 8;
+/// The frames in flight the host starts with.
+pub const DEFAULT_FRAMES_IN_FLIGHT: u32 = 2;
 
 /// Delay between a viewer frame acknowledgment and the next capture. The ack
 /// is the real backpressure (one frame in flight); an unchanged capture waits
@@ -137,6 +139,8 @@ pub struct Core {
     /// Compress the screen with the trained dictionary the Windows desktop
     /// loads as well.
     dictionary: bool,
+    /// How many frames may be on the wire at the same time.
+    frames_in_flight_max: u32,
     /// The frame for the pending approval was already requested.
     approval_requested: bool,
     pub frames_sent: u64,
@@ -162,7 +166,7 @@ impl Core {
         Core {
             password: password.into(), custom_proof, throttle: Throttle::default(), peer: None, phase: Phase::None, tools_connected: false,
             control: false, pending_frame: None, last_frame: None, next_seq: FIRST_FRAME_NUMBER, frames_in_flight: 0,
-            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, approval_requested: false, frames_sent: 0, out: Vec::new(),
+            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, frames_in_flight_max: DEFAULT_FRAMES_IN_FLIGHT, approval_requested: false, frames_sent: 0, out: Vec::new(),
         }
     }
 
@@ -184,6 +188,16 @@ impl Core {
     /// Compress the screen with the trained dictionary or without it.
     pub fn set_dictionary(&mut self, on: bool) {
         self.dictionary = on;
+    }
+
+    /// How many frames may be on the wire at the same time.
+    pub fn frames_in_flight_max(&self) -> u32 {
+        self.frames_in_flight_max
+    }
+
+    /// Set how many frames may be on the wire at the same time.
+    pub fn set_frames_in_flight(&mut self, frames: u32) {
+        self.frames_in_flight_max = frames.clamp(1, MAX_FRAMES_IN_FLIGHT);
     }
 
     /// True while a connection waits for the local approval and the frame
@@ -323,7 +337,7 @@ impl Core {
 
     /// True once when a capture should be taken now.
     pub fn take_capture_due(&mut self, now: Instant) -> bool {
-        if self.phase == Phase::Streaming && self.frames_in_flight < MAX_FRAMES_IN_FLIGHT
+        if self.phase == Phase::Streaming && self.frames_in_flight < self.frames_in_flight_max
             && self.capture_at.is_some_and(|t| t <= now)
         {
             self.capture_at = None;
@@ -333,7 +347,7 @@ impl Core {
     }
 
     pub fn submit_frame(&mut self, frame: Frame, now: Instant) -> Result<()> {
-        if self.phase != Phase::Streaming || self.frames_in_flight >= MAX_FRAMES_IN_FLIGHT {
+        if self.phase != Phase::Streaming || self.frames_in_flight >= self.frames_in_flight_max {
             return Ok(());
         }
         if let Some(prev) = &self.last_frame {
@@ -379,7 +393,7 @@ impl Core {
     }
 
     fn send_frame(&mut self, frame: Frame, now: Instant) -> Result<()> {
-        if self.phase != Phase::Streaming || self.frames_in_flight >= MAX_FRAMES_IN_FLIGHT {
+        if self.phase != Phase::Streaming || self.frames_in_flight >= self.frames_in_flight_max {
             return Ok(());
         }
         let Some(route) = self.peer.as_ref().map(|p| p.route) else { return Ok(()) };

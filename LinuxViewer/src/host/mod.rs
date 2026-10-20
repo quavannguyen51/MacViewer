@@ -44,11 +44,14 @@ pub struct Options {
     /// loads, so the frames are smaller. On by default; turn it off when the
     /// other side cannot read those frames.
     pub dictionary: bool,
+    /// How many frames may be on the wire at the same time. More makes the
+    /// picture faster on a slow link, with a little more lag.
+    pub frames: Option<u32>,
 }
 
 pub const USAGE: &str = "linuxviewer host [--auto-approve control|view] [--monitor N|all] [--clipboard] \
                          [--backend auto|x11|wayland] [--download-dir PATH] [--pacing MS]
-                         [--zstd-dict] [--no-zstd-dict]";
+                         [--zstd-dict] [--no-zstd-dict] [--frames N]";
 
 impl Options {
     /// Parses the arguments after `host`.
@@ -70,6 +73,7 @@ impl Options {
                 "--pacing" => o.pacing_ms = Some(parse_pacing(&value(arg)?)?),
                 "--zstd-dict" => o.dictionary = true,
                 "--no-zstd-dict" => o.dictionary = false,
+                "--frames" => o.frames = Some(parse_frames(&value(arg)?)?),
                 "--backend" => o.backend = match value(arg)?.as_str() {
                     "auto" => BackendChoice::Auto,
                     "x11" => BackendChoice::X11,
@@ -87,6 +91,15 @@ impl Options {
         }
         Ok(o)
     }
+}
+
+/// How many frames may be on the wire at the same time.
+fn parse_frames(value: &str) -> Result<u32> {
+    let n: u32 = value.trim().parse().map_err(|_| format!("--frames takes a number, not {value:?}"))?;
+    if !(1..=super::session::MAX_FRAMES_IN_FLIGHT).contains(&n) {
+        return Err(format!("--frames takes 1 to {}", super::session::MAX_FRAMES_IN_FLIGHT).into());
+    }
+    Ok(n)
 }
 
 /// A frame delay in milliseconds, 0 to 1000.
@@ -164,10 +177,14 @@ mod tests {
         let o = Options::parse(&args("--auto-approve view --monitor 2 --clipboard --backend wayland --download-dir /tmp/x")).unwrap();
         assert_eq!(o, Options { auto_approve: Some(false), selection: Selection::Display(2), clipboard: true,
                                 backend: BackendChoice::Wayland, download_dir: Some("/tmp/x".into()), pacing_ms: None,
-                                dictionary: true });
+                                dictionary: true, frames: None });
         assert_eq!(Options::parse(&[]).unwrap().dictionary, true);
         assert_eq!(Options::parse(&args("--no-zstd-dict")).unwrap().dictionary, false);
         assert_eq!(Options::parse(&args("--zstd-dict")).unwrap().dictionary, true);
+        assert_eq!(Options::parse(&args("--frames 4")).unwrap().frames, Some(4));
+        for bad in ["--frames", "--frames x", "--frames 0", "--frames 99"] {
+            assert!(Options::parse(&args(bad)).is_err(), "{bad}");
+        }
         assert_eq!(Options::parse(&args("--auto-approve control")).unwrap().auto_approve, Some(true));
         for bad in ["--auto-approve", "--auto-approve yes", "--monitor 0", "--backend mir", "--bogus"] {
             assert!(Options::parse(&args(bad)).is_err(), "{bad}");
