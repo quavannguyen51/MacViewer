@@ -25,7 +25,10 @@ pub struct Pacing {
 }
 
 impl Pacing {
-    pub const STANDARD: Pacing = Pacing { changed: Duration::from_millis(40), unchanged: Duration::from_millis(250) };
+    /// Sixteen milliseconds between frames is up to 60 frames a second; the
+    /// host really sends as many as it can encode, and a frame with a delta
+    /// is small, so the link is not the limit.
+    pub const STANDARD: Pacing = Pacing { changed: Duration::from_millis(16), unchanged: Duration::from_millis(250) };
 
     /// A custom delay between frames, in milliseconds. 0 means "no waiting":
     /// the next frame is captured as soon as the viewer acknowledges the
@@ -453,7 +456,7 @@ mod tests {
     #[test]
     fn pacing_and_sequence_policy() {
         let p = Pacing::STANDARD;
-        assert_eq!((p.delay(true), p.delay(false)), (Duration::from_millis(40), Duration::from_millis(250)));
+        assert_eq!((p.delay(true), p.delay(false)), (Duration::from_millis(16), Duration::from_millis(250)));
         assert!(!resets_sequence(Reinit::DisplayLayoutChange));
         assert!(resets_sequence(Reinit::FreshApproval) && resets_sequence(Reinit::ViewerRelogin));
     }

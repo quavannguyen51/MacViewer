@@ -38,7 +38,7 @@ pub struct Options {
     /// Where received files go (default: XDG download dir or ~/Downloads).
     pub download_dir: Option<PathBuf>,
     /// Milliseconds to wait between frames; 0 sends them as fast as the
-    /// viewer acknowledges them. None keeps the UltraViewer default (40 ms).
+    /// viewer acknowledges them. None keeps the default (16 ms).
     pub pacing_ms: Option<u64>,
     /// Compress the screen with the trained dictionary the Windows desktop
     /// loads, so the frames are smaller. On by default; turn it off when the

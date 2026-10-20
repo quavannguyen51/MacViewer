@@ -58,10 +58,10 @@ desktop's own file chooser. A file the partner sends to this computer is
 saved in the download folder (`~/Downloads`).
 
 `--pacing MS` sets how long the host waits between frames while hosting
-(default 40 ms, the UltraViewer default; 0 means "as fast as the viewer
-acknowledges"). The same value can be set with the `LINUXVIEWER_PACING_MS`
-environment variable, which the window's "Share this screen" button also
-picks up.
+(default 16 ms, so up to 60 frames a second; the host really sends as
+many as it can encode, and 0 means "as fast as the viewer acknowledges").
+The same value can be set with the `LINUXVIEWER_PACING_MS` environment
+variable, which the window's "Share this screen" button also picks up.
 
 In the viewer window:
 
