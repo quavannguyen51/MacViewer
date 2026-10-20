@@ -407,7 +407,7 @@ mod tests {
 
         let paint = |payload: &[u8]| {
             let parts = decode_multipart(payload).unwrap();
-            let refs: Vec<&[u8]> = parts.iter().map(|v| v.as_slice()).collect();
+            let refs: Vec<&[u8]> = parts.iter().copied().collect();
             let mut r = Renderer::with_options(&ScreenInit { width: w as u32, height: h as u32, tile_size: 16, ..Default::default() },
                                                 0, 0, Limits::default()).unwrap();
             r.apply(&refs).unwrap();

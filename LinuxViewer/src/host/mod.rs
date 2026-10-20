@@ -158,7 +158,8 @@ mod tests {
     fn parses_host_options() {
         let o = Options::parse(&args("--auto-approve view --monitor 2 --clipboard --backend wayland --download-dir /tmp/x")).unwrap();
         assert_eq!(o, Options { auto_approve: Some(false), selection: Selection::Display(2), clipboard: true,
-                                backend: BackendChoice::Wayland, download_dir: Some("/tmp/x".into()), pacing_ms: None });
+                                backend: BackendChoice::Wayland, download_dir: Some("/tmp/x".into()), pacing_ms: None,
+                                dictionary: false });
         assert_eq!(Options::parse(&[]).unwrap(), Options::default());
         assert_eq!(Options::parse(&args("--auto-approve control")).unwrap().auto_approve, Some(true));
         for bad in ["--auto-approve", "--auto-approve yes", "--monitor 0", "--backend mir", "--bogus"] {
