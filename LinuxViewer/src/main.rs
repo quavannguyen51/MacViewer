@@ -62,7 +62,11 @@ fn run(args: &[String]) -> Result<()> {
         }
         None | Some("gui") => linuxviewer::ui::run_gui(),
         Some("snapshot") => snapshot(args),
-        Some("host") => linuxviewer::host::run_with(Profile::load_or_create_host()?, linuxviewer::host::Options::parse(&args[1..])?),
+        Some("host") => {
+            // Parse the options first: a typo must not start a registration.
+            let options = linuxviewer::host::Options::parse(&args[1..])?;
+            linuxviewer::host::run_with(Profile::load_or_create_host()?, options)
+        }
         Some("id") => {
             let profile = if flag("--host") { Profile::load_or_create_host()? } else { Profile::load_or_create()? };
             let cmd = CommandConnection::register(&profile.registration)?;
