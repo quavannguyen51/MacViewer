@@ -118,6 +118,9 @@ pub struct Core {
     capture_at: Option<Instant>,
     deadline: Option<Instant>,
     pacing: Pacing,
+    /// Compress the screen with the trained dictionary the Windows desktop
+    /// loads as well.
+    dictionary: bool,
     pub frames_sent: u64,
     pub out: Vec<Action>,
 }
@@ -141,7 +144,7 @@ impl Core {
         Core {
             password: password.into(), custom_proof, throttle: Throttle::default(), peer: None, phase: Phase::None, tools_connected: false,
             control: false, pending_frame: None, last_frame: None, next_seq: FIRST_FRAME_NUMBER, frames_in_flight: 0,
-            capture_at: None, deadline: None, pacing: Pacing::STANDARD, frames_sent: 0, out: Vec::new(),
+            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, frames_sent: 0, out: Vec::new(),
         }
     }
 
@@ -158,6 +161,11 @@ impl Core {
     /// The frame pacing in use.
     pub fn pacing(&self) -> Pacing {
         self.pacing
+    }
+
+    /// Compress the screen with the trained dictionary or without it.
+    pub fn set_dictionary(&mut self, on: bool) {
+        self.dictionary = on;
     }
 
     /// Route of the viewer that may use chat/clipboard/files.
@@ -348,7 +356,15 @@ impl Core {
         if self.last_frame.as_ref().is_some_and(|old| !old.same_layout(&frame)) {
             return self.initialize(frame, self.control, Reinit::DisplayLayoutChange, now);
         }
-        let data = encode::full_frame(&frame, self.next_seq, Compression::Zstandard)?;
+        // Only the parts of the screen that changed are sent; the viewer
+        // keeps the rest of the picture.
+        let dictionary = self.dictionary.then_some(crate::screen::SCREEN_DICTIONARY);
+        let data = match self.last_frame.as_ref() {
+            Some(previous) if previous.same_layout(&frame) => {
+                encode::delta_frame(&frame, previous, self.next_seq, dictionary)?
+            }
+            _ => encode::full_frame_with(&frame, self.next_seq, Compression::Zstandard, dictionary)?,
+        };
         if self.next_seq == i32::MAX {
             return Err("frame numbers exhausted".into());
         }

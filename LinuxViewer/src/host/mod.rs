@@ -40,10 +40,13 @@ pub struct Options {
     /// Milliseconds to wait between frames; 0 sends them as fast as the
     /// viewer acknowledges them. None keeps the UltraViewer default (40 ms).
     pub pacing_ms: Option<u64>,
+    /// Compress the screen with the trained dictionary the Windows desktop
+    /// loads, so the frames are smaller.
+    pub dictionary: bool,
 }
 
 pub const USAGE: &str = "linuxviewer host [--auto-approve control|view] [--monitor N|all] [--clipboard] \
-                         [--backend auto|x11|wayland] [--download-dir PATH] [--pacing MS]";
+                         [--backend auto|x11|wayland] [--download-dir PATH] [--pacing MS] [--zstd-dict]";
 
 impl Options {
     /// Parses the arguments after `host`.
@@ -61,6 +64,7 @@ impl Options {
                 "--monitor" => o.selection = Selection::parse(&value(arg)?)?,
                 "--clipboard" => o.clipboard = true,
                 "--pacing" => o.pacing_ms = Some(parse_pacing(&value(arg)?)?),
+                "--zstd-dict" => o.dictionary = true,
                 "--backend" => o.backend = match value(arg)?.as_str() {
                     "auto" => BackendChoice::Auto,
                     "x11" => BackendChoice::X11,

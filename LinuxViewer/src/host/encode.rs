@@ -117,6 +117,12 @@ pub fn initialization(width: usize, height: usize, version: &str, virtual_left: 
 /// Command 1 with one full-screen main rectangle, no JPEG/scroll/cache. Rows
 /// are sent top-down; the viewer writes its own bottom-up DIB.
 pub fn full_frame(frame: &Frame, sequence: i32, compression: Compression) -> std::result::Result<Vec<u8>, EncodeError> {
+    full_frame_with(frame, sequence, compression, None)
+}
+
+/// The full frame, compressed with the trained screen dictionary when one is
+/// given.
+pub fn full_frame_with(frame: &Frame, sequence: i32, compression: Compression, dictionary: Option<&[u8]>) -> std::result::Result<Vec<u8>, EncodeError> {
     let n = checked_pixel_bytes(frame.width, frame.height)?;
     if frame.rgb555_bottom_up.len() != n {
         return Err(EncodeError::InvalidPixelLength { expected: n, received: frame.rgb555_bottom_up.len() });
@@ -139,13 +145,121 @@ pub fn full_frame(frame: &Frame, sequence: i32, compression: Compression) -> std
         rect.extend_from_slice(&v.to_le_bytes());
     }
     let compressed = match compression {
-        Compression::Zstandard => zstd_encode(&top_down, max_compressed).map_err(|e| match e {
+        Compression::Zstandard => compress(&top_down, max_compressed, dictionary).map_err(|e| match e {
             EncodeError::OutputLimitExceeded => EncodeError::SizeLimitExceeded,
             e => e,
         })?,
         Compression::Raw => raw_zstd_frame(&top_down),
     };
     Ok(encode_multipart(&[&[1], &rect, &compressed, &[], &long(sequence), &[], &[], &[], &[], &[], &[]]))
+}
+
+/// The tile size used to find the changed parts of the screen.
+pub const TILE: usize = 64;
+
+/// A rectangle of the screen, in top-left coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// The changed parts of the screen, as rectangles that cover every changed
+/// tile. The tiles of one row that follow each other are merged.
+pub fn changed_rectangles(current: &Frame, previous: &Frame) -> Vec<Rect> {
+    let (w, h) = (current.width, current.height);
+    if w != previous.width || h != previous.height {
+        return Vec::new();
+    }
+    let stride = w * 2;
+    let tiles_x = w.div_ceil(TILE);
+    let tiles_y = h.div_ceil(TILE);
+    let mut rects = Vec::new();
+    for ty in 0..tiles_y {
+        let y = ty * TILE;
+        let th = TILE.min(h - y);
+        let mut tx = 0;
+        while tx < tiles_x {
+            let x = tx * TILE;
+            let tw = TILE.min(w - x);
+            if !tile_changed(current, previous, stride, x, y, tw, th) {
+                tx += 1;
+                continue;
+            }
+            // Merge the tiles that follow in the same row.
+            let mut end = tx + 1;
+            while end < tiles_x {
+                let nx = end * TILE;
+                let ntw = TILE.min(w - nx);
+                if !tile_changed(current, previous, stride, nx, y, ntw, th) {
+                    break;
+                }
+                end += 1;
+            }
+            let right = (end * TILE).min(w);
+            rects.push(Rect { x: x as u16, y: y as u16, w: (right - x) as u16, h: th as u16 });
+            tx = end;
+        }
+    }
+    rects
+}
+
+/// True when the pixels of the tile differ between the two frames.
+fn tile_changed(current: &Frame, previous: &Frame, stride: usize, x: usize, y: usize, w: usize, h: usize) -> bool {
+    let first = current.height - y - h;
+    let off = x * 2;
+    let len = w * 2;
+    for row in 0..h {
+        let at = (first + row) * stride + off;
+        if current.rgb555_bottom_up[at..at + len] != previous.rgb555_bottom_up[at..at + len] {
+            return true;
+        }
+    }
+    false
+}
+
+/// The pixels of the rectangles, top-down and back to back, as the viewer
+/// expects them.
+fn rectangle_pixels(frame: &Frame, rects: &[Rect]) -> Vec<u8> {
+    let stride = frame.width * 2;
+    let mut out = Vec::new();
+    for r in rects {
+        let (x, y, w, h) = (r.x as usize, r.y as usize, r.w as usize, r.h as usize);
+        let first = frame.height - y - h;
+        for row in (0..h).rev() {
+            let at = (first + row) * stride + x * 2;
+            out.extend_from_slice(&frame.rgb555_bottom_up[at..at + w * 2]);
+        }
+    }
+    out
+}
+
+/// Command 1 with only the parts of the screen that changed. `current` and
+/// `previous` must have the same layout. Falls back to the full frame when
+/// almost everything changed: that is smaller and simpler.
+pub fn delta_frame(current: &Frame, previous: &Frame, sequence: i32, dictionary: Option<&[u8]>) -> std::result::Result<Vec<u8>, EncodeError> {
+    let rects = changed_rectangles(current, previous);
+    if rects.is_empty() {
+        return full_frame_with(current, sequence, Compression::Zstandard, dictionary);
+    }
+    let changed: usize = rects.iter().map(|r| r.w as usize * r.h as usize).sum();
+    let whole = current.width * current.height;
+    if changed * 2 >= whole {
+        // Most of the screen changed: a full frame is not bigger.
+        return full_frame_with(current, sequence, Compression::Zstandard, dictionary);
+    }
+    let pixels = rectangle_pixels(current, &rects);
+    let max_compressed = MAX_PAYLOAD - (44 + 1 + 8 + 4);
+    let compressed = compress(&pixels, max_compressed, dictionary)?;
+    let mut words = Vec::with_capacity(rects.len() * 8);
+    for r in &rects {
+        for v in [r.x, r.y, r.w, r.h] {
+            words.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    Ok(encode_multipart(&[&[1], &words, &compressed, &[], &long(sequence), &[], &[], &[], &[], &[], &[]]))
 }
 
 /// Reply to the viewer's ASCII "20" keepalive.
@@ -164,6 +278,35 @@ fn raw_zstd_frame(bytes: &[u8]) -> Vec<u8> {
         out.extend_from_slice(chunk);
     }
     out
+}
+
+/// Compress with the trained screen dictionary when one is given: the
+/// Windows desktop loads the same dictionary to decode the frames.
+fn compress(bytes: &[u8], max_output: usize, dictionary: Option<&[u8]>) -> std::result::Result<Vec<u8>, EncodeError> {
+    let Some(dict) = dictionary else { return zstd_encode(bytes, max_output) };
+    if bytes.len() > ZSTD_MAX_INPUT {
+        return Err(EncodeError::InputLimitExceeded);
+    }
+    let mut out = vec![0u8; zstd_safe::compress_bound(bytes.len()).min(max_output)];
+    let mut cctx = zstd_safe::CCtx::create();
+    if let Err(code) = cctx.load_dictionary(dict) {
+        let name = zstd_safe::get_error_name(code);
+        return Err(EncodeError::CompressionFailed(name.into()));
+    }
+    match cctx.compress(&mut out[..], bytes, 1) {
+        Ok(n) => {
+            out.truncate(n);
+            Ok(out)
+        }
+        Err(code) => {
+            let name = zstd_safe::get_error_name(code);
+            if name.contains("too small") {
+                Err(EncodeError::OutputLimitExceeded)
+            } else {
+                Err(EncodeError::CompressionFailed(name.into()))
+            }
+        }
+    }
 }
 
 pub const ZSTD_MAX_INPUT: usize = 16 * 1024 * 1024;
@@ -222,6 +365,69 @@ mod tests {
         let n = zstd_safe::decompress(&mut out[..], b).unwrap();
         out.truncate(n);
         out
+    }
+
+    /// A screen of `w` x `h` pixels with a pattern that changes at `spot`.
+    fn pattern(w: usize, h: usize, spot: Option<(usize, usize)>) -> Frame {
+        let mut pixels = vec![0u8; w * h * 2];
+        for y in 0..h {
+            for x in 0..w {
+                let at = (y * w + x) * 2;
+                let mut v = ((x * 7 + y * 13) % 0x7fff) as u16;
+                if let Some((sx, sy)) = spot {
+                    if x == sx && y == sy {
+                        v = 0x1234;
+                    }
+                }
+                pixels[at..at + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        // The frame keeps the rows bottom-up.
+        let stride = w * 2;
+        let mut bottom_up = vec![0u8; pixels.len()];
+        for y in 0..h {
+            let src = (h - 1 - y) * stride;
+            bottom_up[y * stride..(y + 1) * stride].copy_from_slice(&pixels[src..src + stride]);
+        }
+        Frame { width: w, height: h, rgb555_bottom_up: bottom_up, ..Default::default() }
+    }
+
+    /// The delta frame must paint exactly the same picture as a full frame.
+    #[test]
+    fn delta_frame_paints_the_same_picture_as_a_full_frame() {
+        use crate::screen::{Limits, Renderer, ScreenInit};
+        let (w, h) = (256usize, 128usize);
+        let before = pattern(w, h, None);
+        let after = pattern(w, h, Some((100, 60)));
+
+        let full = full_frame(&after, 1, Compression::Zstandard).unwrap();
+        let delta = delta_frame(&after, &before, 1, None).unwrap();
+        // The delta carries only the changed part.
+        assert!(delta.len() < full.len(), "delta {} full {}", delta.len(), full.len());
+
+        let paint = |payload: &[u8]| {
+            let parts = decode_multipart(payload).unwrap();
+            let refs: Vec<&[u8]> = parts.iter().map(|v| v.as_slice()).collect();
+            let mut r = Renderer::with_options(&ScreenInit { width: w as u32, height: h as u32, tile_size: 16, ..Default::default() },
+                                                0, 0, Limits::default()).unwrap();
+            r.apply(&refs).unwrap();
+            r.pixels().to_vec()
+        };
+        assert_eq!(paint(&full), paint(&delta));
+    }
+
+    /// The changed rectangles must cover every changed pixel.
+    #[test]
+    fn changed_rectangles_cover_the_change() {
+        let (w, h) = (256usize, 128usize);
+        let before = pattern(w, h, None);
+        let after = pattern(w, h, Some((100, 60)));
+        let rects = changed_rectangles(&after, &before);
+        assert!(!rects.is_empty());
+        assert!(rects.iter().any(|r| r.x <= 100 && 100 < r.x as usize + r.w as usize
+            && r.y <= 60 && 60 < r.y as usize + r.h as usize));
+        // An unchanged screen has no rectangles.
+        assert!(changed_rectangles(&before, &before).is_empty());
     }
 
     // HostedScreenMessageTests.swift

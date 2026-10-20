@@ -128,6 +128,10 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
         None => Pacing::STANDARD,
     };
     core.set_pacing(pacing);
+    if opts.dictionary {
+        eprintln!("Screen compression: with the trained dictionary.");
+    }
+    core.set_dictionary(opts.dictionary);
     let mut relay: Option<Relay> = None;
     let mut relay_generation = 0u64;
     let mut next_keepalive = Instant::now() + Duration::from_secs(60);
