@@ -72,15 +72,15 @@ impl Widget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Rect {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+pub(crate) struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
 }
 
 impl Rect {
-    fn contains(&self, x: f64, y: f64) -> bool {
+    pub(crate) fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x as f64 && y >= self.y as f64 && x < (self.x + self.w) as f64 && y < (self.y + self.h) as f64
     }
 }
@@ -298,15 +298,22 @@ fn glyph(c: char) -> [u8; 8] {
     font8x8::BASIC_FONTS.get(c).or_else(|| font8x8::LATIN_FONTS.get(c)).unwrap_or_else(|| font8x8::BASIC_FONTS.get('?').unwrap())
 }
 
-struct Canvas<'a> {
+pub(crate) struct Canvas<'a> {
     buf: &'a mut [u32],
     w: i32,
     h: i32,
     s: i32,
 }
 
+impl<'a> Canvas<'a> {
+    /// A canvas over an existing framebuffer, for drawing over a window.
+    pub(crate) fn new(buf: &'a mut [u32], w: i32, h: i32) -> Canvas<'a> {
+        Canvas { buf, w, h, s: 1 }
+    }
+}
+
 impl Canvas<'_> {
-    fn fill(&mut self, r: Rect, color: u32) {
+    pub(crate) fn fill(&mut self, r: Rect, color: u32) {
         let (x0, y0) = (r.x.max(0), r.y.max(0));
         let (x1, y1) = ((r.x + r.w).min(self.w), (r.y + r.h).min(self.h));
         if x0 >= x1 {
@@ -318,7 +325,37 @@ impl Canvas<'_> {
         }
     }
 
-    fn stroke(&mut self, r: Rect, color: u32, t: i32) {
+    /// A translucent rectangle, for panels drawn over the remote screen.
+    pub(crate) fn fill_alpha(&mut self, r: Rect, color: u32, alpha: f32) {
+        let (x0, y0) = (r.x.max(0), r.y.max(0));
+        let (x1, y1) = ((r.x + r.w).min(self.w), (r.y + r.h).min(self.h));
+        if x0 >= x1 {
+            return;
+        }
+        let (sr, sg, sb) = (
+            ((color >> 16) & 0xff) as f32,
+            ((color >> 8) & 0xff) as f32,
+            (color & 0xff) as f32,
+        );
+        for y in y0..y1 {
+            let row = (y * self.w) as usize;
+            for x in x0..x1 {
+                let idx = row + x as usize;
+                let old = self.buf[idx];
+                let (or, og, ob) = (
+                    ((old >> 16) & 0xff) as f32,
+                    ((old >> 8) & 0xff) as f32,
+                    (old & 0xff) as f32,
+                );
+                let nr = (sr * alpha + or * (1.0 - alpha)).round() as u32;
+                let ng = (sg * alpha + og * (1.0 - alpha)).round() as u32;
+                let nb = (sb * alpha + ob * (1.0 - alpha)).round() as u32;
+                self.buf[idx] = (nr << 16) | (ng << 8) | nb;
+            }
+        }
+    }
+
+    pub(crate) fn stroke(&mut self, r: Rect, color: u32, t: i32) {
         self.fill(Rect { h: t, ..r }, color);
         self.fill(Rect { y: r.y + r.h - t, h: t, ..r }, color);
         self.fill(Rect { w: t, ..r }, color);
@@ -326,12 +363,12 @@ impl Canvas<'_> {
     }
 
     /// Measure the pixel width of `text` at font size `px`.
-    fn measure(&self, text: &str, px: i32) -> i32 {
+    pub(crate) fn measure(&self, text: &str, px: i32) -> i32 {
         self.measure_w(text, px, Weight::Regular)
     }
 
     /// Measure the pixel width of `text` at font size `px` in the given weight.
-    fn measure_w(&self, text: &str, px: i32, weight: Weight) -> i32 {
+    pub(crate) fn measure_w(&self, text: &str, px: i32, weight: Weight) -> i32 {
         let Some(font) = font_for(weight) else {
             let k = (px / 10).max(1);
             return ascii_fallback(text).chars().count() as i32 * 8 * k;
@@ -350,12 +387,12 @@ impl Canvas<'_> {
     }
 
     /// Draw antialiased text at pixel size `px`; returns its width.
-    fn text(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32) -> i32 {
+    pub(crate) fn text(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32) -> i32 {
         self.text_w(x, y, text, color, px, Weight::Regular)
     }
 
     /// Draw antialiased text in the given weight; returns its width.
-    fn text_w(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32, weight: Weight) -> i32 {
+    pub(crate) fn text_w(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32, weight: Weight) -> i32 {
         let Some(font) = font_for(weight) else { return self.text_bitmap(x, y, text, color, px) };
         let px = px.max(4) as f32;
         let line = match font.horizontal_line_metrics(px) {

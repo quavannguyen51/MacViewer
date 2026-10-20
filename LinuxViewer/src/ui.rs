@@ -6,7 +6,7 @@
 use crate::audio::{self, AudioMessage, G722Decoder, Player};
 use crate::chat::{self, ChatEvent};
 use crate::client::{self, ClientEvent, ClientSession, ConnectOptions};
-use crate::launcher::{HostLine, Launcher, LauncherAction};
+use crate::launcher::{Canvas, HostLine, Launcher, LauncherAction, Rect};
 use crate::files;
 use crate::cursor::{CursorImage, CursorState};
 use crate::input::{self, Encoder};
@@ -223,6 +223,8 @@ struct App {
     move_due: Option<Instant>,
     /// Watches the local clipboard while the session runs.
     clipboard_watch: Option<ClipboardWatch>,
+    /// The buttons of the overlay toolbar and where they are.
+    toolbar: Vec<ToolbarButton>,
 }
 
 /// How often the local clipboard is checked for a change.
@@ -403,6 +405,9 @@ impl App {
             title += if self.view_only { " — view only" } else if self.control { " — Control ON" } else { " — Control OFF" };
             if self.sound {
                 title += " — Sound ON";
+            }
+            if self.clipboard_sharing {
+                title += " — Clipboard ON";
             }
             title += &match (self.zoom, self.layout) {
                 (Some(z), _) => format!(" — zoom {:.0}%", z * 100.0),
@@ -642,10 +647,116 @@ impl App {
             }
         }
         drop(screen);
+        // The toolbar sits on top of the remote screen.
+        self.draw_toolbar(&mut buf, ww as i32, wh as i32);
         let _ = buf.present();
         if misfit && self.notice.is_none() {
             let n = self.monitor;
             self.notify(format!("Monitor {n} does not fit the received desktop image, so all monitors are shown."));
+        }
+    }
+}
+
+/// What a toolbar button does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ToolbarAction {
+    Control,
+    Sound,
+    Clipboard,
+    Chat,
+    Zoom,
+    Monitor,
+    Help,
+}
+
+/// One button of the overlay toolbar.
+struct ToolbarButton {
+    action: ToolbarAction,
+    /// Where the button is, in window pixels.
+    rect: Rect,
+    /// The button is on (Control, Sound, Clipboard).
+    active: bool,
+}
+
+/// The buttons of the overlay toolbar, drawn on top of the remote screen.
+fn toolbar_buttons(control: bool, sound: bool, clipboard: bool) -> Vec<(ToolbarAction, &'static str, bool)> {
+    vec![
+        (ToolbarAction::Control, "Control", control),
+        (ToolbarAction::Sound, "Sound", sound),
+        (ToolbarAction::Clipboard, "Clipboard", clipboard),
+        (ToolbarAction::Chat, "Chat", false),
+        (ToolbarAction::Zoom, "Zoom", false),
+        (ToolbarAction::Monitor, "Monitor", false),
+        (ToolbarAction::Help, "Help", false),
+    ]
+}
+
+impl App {
+    /// Draw the toolbar over the remote screen and remember where the buttons
+    /// are, so a click can be routed to them.
+    fn draw_toolbar(&mut self, buf: &mut [u32], ww: i32, wh: i32) {
+        if self.encoder.is_none() {
+            self.toolbar.clear();
+            return;
+        }
+        let px = 13;
+        let pad = 6;
+        let gap = 6;
+        let height = 26;
+        let mut canvas = Canvas::new(buf, ww, wh);
+        let buttons = toolbar_buttons(self.control, self.sound, self.clipboard_sharing);
+        // Measure the labels first so the bar gets the right width.
+        let widths: Vec<i32> = buttons.iter().map(|(_, label, _)| canvas.measure(label, px)).collect();
+        let total: i32 = widths.iter().sum::<i32>() + pad * 2 * buttons.len() as i32 + gap * (buttons.len() as i32 - 1);
+        let x0 = 8;
+        let y0 = 8;
+        canvas.fill_alpha(Rect { x: x0 - 4, y: y0 - 4, w: total + 8, h: height + 8 }, 0x0018_1a1d, 0.72);
+        let mut x = x0;
+        let mut placed = Vec::new();
+        for ((action, label, active), width) in buttons.iter().zip(widths.iter()) {
+            let r = Rect { x, y: y0, w: width + pad * 2, h: height };
+            if *active {
+                canvas.fill(r, 0x002f_6fde);
+            }
+            canvas.stroke(r, if *active { 0x002f_6fde } else { 0x0060_666e }, 1);
+            let color = if *active { 0x00ff_ffff } else { 0x00e6_e8ec };
+            canvas.text(x + pad, y0 + (height - 16) / 2, label, color, px);
+            placed.push(ToolbarButton { action: *action, rect: r, active: *active });
+            x += r.w + gap;
+        }
+        self.toolbar = placed;
+    }
+
+    /// The toolbar button under the pointer, if any.
+    fn toolbar_hit(&self, x: f64, y: f64) -> Option<ToolbarAction> {
+        self.toolbar.iter().find(|b| b.rect.contains(x, y)).map(|b| b.action)
+    }
+
+    /// Run a toolbar button.
+    fn toolbar_action(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::Control => {
+                let on = !self.control;
+                self.set_control(on);
+            }
+            ToolbarAction::Sound => {
+                let on = !self.sound;
+                self.set_sound(on);
+            }
+            ToolbarAction::Clipboard => {
+                let on = !self.clipboard_sharing;
+                self.set_clipboard_sharing(on);
+            }
+            ToolbarAction::Chat => {
+                self.release_all();
+                self.compose = Some(String::new());
+                let t = chat::viewer_to_host_typing(true);
+                self.command(t.payload, t.format_flag);
+                self.update_title();
+            }
+            ToolbarAction::Zoom => self.cycle_zoom(),
+            ToolbarAction::Monitor => self.cycle_monitor(),
+            ToolbarAction::Help => self.notify(HELP),
         }
     }
 }
@@ -928,15 +1039,24 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => self.pointer = None,
             WindowEvent::MouseInput { state, button, .. } => {
-                if !self.forwarding() {
-                    return;
-                }
                 let b = match button {
                     MouseButton::Left => 0,
                     MouseButton::Right => 1,
                     MouseButton::Middle => 2,
                     _ => return,
                 };
+                // A click on the toolbar belongs to the toolbar.
+                if b == 0 && state == ElementState::Pressed {
+                    if let Some(p) = self.pointer {
+                        if let Some(action) = self.toolbar_hit(p.x, p.y) {
+                            self.toolbar_action(action);
+                            return;
+                        }
+                    }
+                }
+                if !self.forwarding() {
+                    return;
+                }
                 // The click goes out at once, after the pending move.
                 self.flush_move_now();
                 let pos = self.remote_pointer();
@@ -1063,7 +1183,7 @@ fn new_viewer(profile: Profile, partner_id: &str, password: &str, base: ConnectO
     App {
         session: None, pending: Some((profile, password.to_string())), proxy: Some(proxy), generation, done: false,
         clipboard: None, clipboard_sharing: false, clipboard_sharing_flag: Arc::new(AtomicBool::new(false)),
-        clipboard_watch: None,
+        clipboard_watch: None, toolbar: Vec::new(),
         transfers: HashMap::new(),
         download_dir: base.download_dir.clone().unwrap_or(if downloads.is_dir() { downloads } else { home }),
         clipboard_at_start: base.clipboard, base,
