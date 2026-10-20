@@ -241,7 +241,7 @@ jobs:
           workspaces: LinuxViewer
 
       - name: Test
-        run: cargo test --locked
+        run: cargo test
         working-directory: LinuxViewer
 
       - name: Package

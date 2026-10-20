@@ -21,7 +21,7 @@ wayland = ["dep:ashpd", "dep:pipewire", "dep:tokio"]
 [dependencies]
 base64 = "0.22"
 cpal = "0.15"
-font8x8 = "0.3"
+fontdue = "0.9"
 cbc = { version = "0.1", features = ["alloc"] }
 des = "0.8"
 aes = "0.8"

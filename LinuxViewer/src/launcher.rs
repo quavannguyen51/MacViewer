@@ -1,6 +1,6 @@
 //! The connect window (ConnectionView.swift): partner ID, password, recents,
 //! and "Share this screen". A small immediate-mode UI drawn with softbuffer and
-//! the font8x8 bitmap font. OWNER: screen.
+//! fontdue (TTF glyphs with antialiasing). OWNER: screen.
 //!
 //! Keyboard: Tab / Shift+Tab move focus, Enter connects (or presses the focused
 //! button), Space presses buttons, Ctrl+V pastes. Hosting runs `linuxviewer
@@ -9,12 +9,12 @@
 
 use crate::client::ClientEvent;
 use crate::ui::UiEvent;
-use font8x8::UnicodeFonts;
 use std::io::{BufRead, BufReader, Write};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
+use std::sync::OnceLock;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -148,7 +148,33 @@ fn remember(recents: &mut Vec<String>, id: &str) {
     recents.truncate(MAX_RECENTS);
 }
 
-/// Replace punctuation font8x8 lacks with ASCII look-alikes.
+/// Load a system TTF font for antialiased text rendering.
+fn ui_font() -> &'static fontdue::Font {
+    static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        const PATHS: &[&str] = &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        ];
+        for p in PATHS {
+            if let Ok(data) = std::fs::read(p) {
+                if let Ok(f) = fontdue::Font::from_bytes(data, fontdue::FontSettings::default()) {
+                    return Some(f);
+                }
+            }
+        }
+        None
+    })
+    .as_ref()
+}
+
+/// Replace punctuation a TTF might lack with ASCII look-alikes.
 fn drawable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -164,11 +190,6 @@ fn drawable(text: &str) -> String {
         }
     }
     out
-}
-
-fn glyph(c: char) -> [u8; 8] {
-    font8x8::BASIC_FONTS.get(c).or_else(|| font8x8::LATIN_FONTS.get(c))
-        .unwrap_or_else(|| font8x8::BASIC_FONTS.get('?').unwrap())
 }
 
 struct Canvas<'a> {
@@ -198,36 +219,85 @@ impl Canvas<'_> {
         self.fill(Rect { x: r.x + r.w - t, w: t, ..r }, color);
     }
 
-    /// Draw text with glyph scale `k` (pixels per font pixel); returns its width.
-    fn text(&mut self, x: i32, y: i32, text: &str, color: u32, k: i32) -> i32 {
-        let mut cx = x;
+    /// Measure the pixel width of `text` at font size `px`.
+    fn measure(&self, text: &str, px: i32) -> i32 {
+        let Some(font) = ui_font() else { return text.chars().count() as i32 * px * 5 / 8 };
+        let px = px.max(4) as f32;
+        let mut w = 0.0f32;
         for c in drawable(text).chars() {
-            let g = glyph(c);
-            for (row, bits) in g.iter().enumerate() {
-                for col in 0..8 {
-                    if bits & (1 << col) != 0 {
-                        self.fill(Rect { x: cx + col * k, y: y + row as i32 * k, w: k, h: k }, color);
-                    }
-                }
-            }
-            cx += 8 * k;
+            w += font.metrics(c, px).advance_width;
         }
-        cx - x
+        w.ceil() as i32
     }
 
-    fn char_w(&self) -> i32 {
-        8 * self.s
+    /// Draw antialiased text at pixel size `px`; returns its width.
+    fn text(&mut self, x: i32, y: i32, text: &str, color: u32, px: i32) -> i32 {
+        let Some(font) = ui_font() else { return 0 };
+        let px = px.max(4) as f32;
+        let line = match font.horizontal_line_metrics(px) {
+            Some(m) => m,
+            None => return 0,
+        };
+        let baseline = y as f32 + line.ascent;
+        let (cr, cg, cb) = (
+            ((color >> 16) & 0xff) as f32,
+            ((color >> 8) & 0xff) as f32,
+            (color & 0xff) as f32,
+        );
+        let mut pen = x as f32;
+        for ch in drawable(text).chars() {
+            let (m, bitmap) = font.rasterize(ch, px);
+            let (gw, gh) = (m.width as i32, m.height as i32);
+            let gx = (pen + m.xmin as f32).round() as i32;
+            let gy = (baseline - m.ymin as f32 - gh as f32).round() as i32;
+            for row in 0..gh {
+                for col in 0..gw {
+                    let cov = bitmap[(row * m.width + col) as usize];
+                    if cov == 0 {
+                        continue;
+                    }
+                    let (pxx, pyy) = (gx + col, gy + row);
+                    if pxx < 0 || pyy < 0 || pxx >= self.w || pyy >= self.h {
+                        continue;
+                    }
+                    let idx = (pyy * self.w + pxx) as usize;
+                    let a = cov as f32 / 255.0;
+                    let old = self.buf[idx];
+                    let (or, og, ob) = (
+                        ((old >> 16) & 0xff) as f32,
+                        ((old >> 8) & 0xff) as f32,
+                        (old & 0xff) as f32,
+                    );
+                    let nr = (cr * a + or * (1.0 - a)).round() as u32;
+                    let ng = (cg * a + og * (1.0 - a)).round() as u32;
+                    let nb = (cb * a + ob * (1.0 - a)).round() as u32;
+                    self.buf[idx] = (nr << 16) | (ng << 8) | nb;
+                }
+            }
+            pen += m.advance_width;
+        }
+        (pen - x as f32).round() as i32
     }
 
     /// Text clipped to `max_w` pixels with a trailing "...".
-    fn fit(&self, text: &str, max_w: i32) -> String {
-        let n = (max_w / self.char_w()).max(1) as usize;
+    fn fit(&self, text: &str, max_w: i32, px: i32) -> String {
         let text = drawable(text);
-        if text.chars().count() <= n {
-            text
-        } else {
-            text.chars().take(n.saturating_sub(3)).chain("...".chars()).collect()
+        if self.measure(&text, px) <= max_w {
+            return text;
         }
+        let ell = "...";
+        let ell_w = self.measure(ell, px);
+        let mut out = String::new();
+        for c in text.chars() {
+            let mut trial = out.clone();
+            trial.push(c);
+            if self.measure(&trial, px) + ell_w > max_w {
+                break;
+            }
+            out.push(c);
+        }
+        out.push_str(ell);
+        out
     }
 }
 
@@ -600,12 +670,13 @@ impl Launcher {
         let width = c.w - 2 * pad;
         let line = 12 * s;
         let field_h = 14 * s;
-        let k = s; // glyph scale: 8*s pixels per character
+        let k = 10 * s; // body text pixel size
+        let kh = 14 * s; // heading pixel size
         let focus = self.focus;
 
         let mut y = pad;
-        c.text(x, y, "LinuxViewer", TEXT, k + s / 2);
-        y += 14 * s;
+        c.text(x, y, "LinuxViewer", TEXT, kh);
+        y += 18 * s;
 
         // Connect section
         c.text(x, y, "Control a remote computer", MUTED, k);
@@ -617,7 +688,7 @@ impl Launcher {
             let r = Rect { x, y, w: width, h: field_h };
             c.fill(r, FIELD);
             c.stroke(r, if focus == widget { ACCENT } else { BORDER }, if focus == widget { s.max(2) } else { (s / 2).max(1) });
-            let shown = c.fit(&value, width - 6 * s);
+            let shown = c.fit(&value, width - 6 * s, k);
             let tw = c.text(x + 3 * s, y + 3 * s, &shown, TEXT, k);
             if focus == widget {
                 c.fill(Rect { x: x + 3 * s + tw + s / 2, y: y + 2 * s, w: s.max(1), h: field_h - 4 * s }, ACCENT);
@@ -626,7 +697,8 @@ impl Launcher {
             y += field_h + 4 * s;
         }
         let button = |c: &mut Canvas, hits: &mut Vec<(Widget, Rect)>, x: i32, y: i32, label: &str, w: Widget, primary: bool, enabled: bool| -> i32 {
-            let bw = (label.chars().count() as i32 + 4) * 8 * s;
+            let tw = c.measure(label, k);
+            let bw = tw + 6 * s;
             let r = Rect { x, y, w: bw, h: field_h };
             let (bg, fg) = match (enabled, primary) {
                 (false, _) => (SECONDARY, MUTED),
@@ -637,7 +709,7 @@ impl Launcher {
             if focus == w {
                 c.stroke(Rect { x: r.x - 2 * s / 2, y: r.y - 2 * s / 2, w: r.w + 2 * s, h: r.h + 2 * s }, TEXT, (s / 2).max(1));
             }
-            c.text(x + 2 * 8 * s, y + 3 * s, label, fg, s);
+            c.text(x + 3 * s, y + 3 * s, label, fg, k);
             if enabled {
                 hits.push((w, r));
             }
@@ -646,7 +718,7 @@ impl Launcher {
         let connect_label = if self.viewer_active { "Connected" } else { "Connect" };
         button(&mut c, &mut hits, x, y, connect_label, Widget::Connect, true, !self.viewer_active);
         y += field_h + 4 * s;
-        let status = c.fit(&self.status, width);
+        let status = c.fit(&self.status, width, k);
         c.text(x, y, &status, if self.status_error { ERROR } else { MUTED }, k);
         y += line + 4 * s;
 
@@ -675,7 +747,7 @@ impl Launcher {
         y += line + 2 * s;
         match &self.host {
             None => {
-                let hint = c.fit("Let a Windows UltraViewer user see or control this computer.", width);
+                let hint = c.fit("Let a Windows UltraViewer user see or control this computer.", width, k);
                 c.text(x, y, &hint, MUTED, k);
                 y += line + 2 * s;
                 button(&mut c, &mut hits, x, y, "Share this screen", Widget::Share, false, true);
@@ -712,7 +784,7 @@ impl Launcher {
             }
         }
         if !self.host_status.is_empty() {
-            let t = c.fit(&self.host_status, width);
+            let t = c.fit(&self.host_status, width, k);
             c.text(x, y, &t, MUTED, k);
         }
         let _ = buf.present();
@@ -756,14 +828,17 @@ mod tests {
 
     #[test]
     fn canvas_draws_and_clips_text() {
-        let mut buf = vec![0u32; 40 * 10];
-        let mut c = Canvas { buf: &mut buf, w: 40, h: 10, s: 1 };
-        assert_eq!(c.text(0, 0, "Hi", 1, 1), 16);
-        assert!(c.buf.iter().any(|p| *p == 1));
-        c.text(35, 5, "clip", 2, 1); // partly outside: must not panic
-        c.fill(Rect { x: -5, y: -5, w: 100, h: 100 }, 3);
+        let mut buf = vec![0u32; 200 * 40];
+        let mut c = Canvas { buf: &mut buf, w: 200, h: 40, s: 1 };
+        let w = c.text(0, 0, "Hi", 0x0020_2124, 14);
+        assert!(w > 0);
+        assert!(c.buf.iter().any(|p| *p != 0));
+        c.text(190, 30, "clip", 2, 14); // partly outside: must not panic
+        c.fill(Rect { x: -5, y: -5, w: 300, h: 100 }, 3);
         assert!(c.buf.iter().all(|p| *p == 3));
-        assert_eq!(c.fit("abcdefgh", 32), "a...");
-        assert_eq!(c.fit("abc", 32), "abc");
+        assert_eq!(c.fit("abc", 500, 14), "abc");
+        let fitted = c.fit("abcdefghijklmnop", 50, 14);
+        assert!(fitted.ends_with("..."));
+        assert!(c.measure("Hello", 14) > c.measure("Hi", 14));
     }
 }

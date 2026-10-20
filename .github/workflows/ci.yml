@@ -118,10 +118,10 @@ jobs:
           workspaces: LinuxViewer
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test
 
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - uses: actions/upload-artifact@v4
         with:
