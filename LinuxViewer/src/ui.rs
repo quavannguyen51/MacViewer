@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -179,7 +181,8 @@ struct App {
     done: bool,
     clipboard: Option<arboard::Clipboard>,
     clipboard_sharing: bool,
-    last_clipboard: Option<String>,
+    /// Shared with the clipboard watcher: only then are local changes sent.
+    clipboard_sharing_flag: Arc<AtomicBool>,
     download_dir: PathBuf,
     transfers: HashMap<String, String>,
     partner_id: String,
@@ -218,6 +221,78 @@ struct App {
     last_move: Instant,
     /// When the coalesced pointer move is due.
     move_due: Option<Instant>,
+    /// Watches the local clipboard while the session runs.
+    clipboard_watch: Option<ClipboardWatch>,
+}
+
+/// How often the local clipboard is checked for a change.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(400);
+
+/// Watches the local clipboard and sends every change to the partner, like
+/// the Swift app does. Without it the clipboard would only be sent when the
+/// window regains focus, so a copy made in another program never arrives.
+struct ClipboardWatch {
+    /// The text that was last sent or set locally, so the partner's own
+    /// clipboard is not sent back.
+    last: Arc<Mutex<String>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl ClipboardWatch {
+    /// Starts the watcher for `session`; it stops when the returned value is
+    /// dropped.
+    fn start(session: client::SessionHandle, sharing: Arc<AtomicBool>) -> Option<ClipboardWatch> {
+        let last = Arc::new(Mutex::new(String::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_last = last.clone();
+        let thread_stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut board = match arboard::Clipboard::new() {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+            // The shared text is the last one that was sent or set locally,
+            // so the partner's own clipboard is never echoed back.
+            *thread_last.lock().unwrap() = board.get_text().unwrap_or_default();
+            while !thread_stop.load(Ordering::Relaxed) {
+                std::thread::sleep(CLIPBOARD_POLL);
+                let Ok(text) = board.get_text() else { continue };
+                if text.is_empty() {
+                    continue;
+                }
+                {
+                    let mut last = thread_last.lock().unwrap();
+                    if *last == text {
+                        continue;
+                    }
+                    *last = text.clone();
+                }
+                if !sharing.load(Ordering::Relaxed) {
+                    continue;
+                }
+                // A failure means the session is gone; keep watching so the
+                // clipboard works again after a reconnect.
+                let _ = session.send_clipboard(&text);
+            }
+        });
+        Some(ClipboardWatch { last, stop })
+    }
+
+    /// Remembers a text so it is not sent again (the partner's own clipboard).
+    fn suppress(&self, text: &str) {
+        *self.last.lock().unwrap() = text.to_string();
+    }
+
+    /// The text that was sent or suppressed last.
+    fn last(&self) -> String {
+        self.last.lock().unwrap().clone()
+    }
+}
+
+impl Drop for ClipboardWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 impl App {
@@ -262,6 +337,7 @@ impl App {
         }
         session.set_clipboard_sharing(on);
         self.clipboard_sharing = on;
+        self.clipboard_sharing_flag.store(on, Ordering::SeqCst);
         if on {
             self.push_clipboard();
         }
@@ -275,8 +351,11 @@ impl App {
         }
         let (Some(c), Some(s)) = (self.clipboard.as_mut(), &self.session) else { return };
         if let Ok(text) = c.get_text() {
-            if !text.is_empty() && self.last_clipboard.as_deref() != Some(text.as_str()) && s.send_clipboard(&text).is_ok() {
-                self.last_clipboard = Some(text);
+            let sent = self.clipboard_watch.as_ref().map(|w| w.last()).unwrap_or_default();
+            if !text.is_empty() && sent != text && s.send_clipboard(&text).is_ok() {
+                if let Some(w) = &self.clipboard_watch {
+                    w.suppress(&text);
+                }
             }
         }
     }
@@ -643,7 +722,13 @@ impl App {
         match client::connect_with(&profile, &self.partner_id, &password, options, Box::new(move |e| {
             let _ = proxy.send_event(UiEvent::Client(generation, e));
         })) {
-            Ok(s) => self.session = Some(s),
+            Ok(s) => {
+                // Watch the local clipboard so a copy in another program
+                // reaches the partner without waiting for a focus change.
+                self.clipboard_watch =
+                    ClipboardWatch::start(s.handle(), self.clipboard_sharing_flag.clone());
+                self.session = Some(s);
+            }
             Err(e) => {
                 self.close_reason = Some(e.to_string());
                 self.done = true;
@@ -727,7 +812,10 @@ impl App {
                 if self.clipboard_sharing {
                     if let Some(c) = self.clipboard.as_mut() {
                         if c.set_text(text.clone()).is_ok() {
-                            self.last_clipboard = Some(text);
+                            // Do not send the partner's own clipboard back.
+                            if let Some(w) = &self.clipboard_watch {
+                                w.suppress(&text);
+                            }
                         }
                     }
                 }
@@ -974,7 +1062,9 @@ fn new_viewer(profile: Profile, partner_id: &str, password: &str, base: ConnectO
     let downloads = home.join("Downloads");
     App {
         session: None, pending: Some((profile, password.to_string())), proxy: Some(proxy), generation, done: false,
-        clipboard: None, clipboard_sharing: false, last_clipboard: None, transfers: HashMap::new(),
+        clipboard: None, clipboard_sharing: false, clipboard_sharing_flag: Arc::new(AtomicBool::new(false)),
+        clipboard_watch: None,
+        transfers: HashMap::new(),
         download_dir: base.download_dir.clone().unwrap_or(if downloads.is_dir() { downloads } else { home }),
         clipboard_at_start: base.clipboard, base,
         partner_id: partner_id.to_string(), state: "connecting…".into(), close_reason: None,
