@@ -648,7 +648,13 @@ impl App {
         }
         drop(screen);
         // The toolbar sits on top of the remote screen.
-        self.draw_toolbar(&mut buf, ww as i32, wh as i32);
+        let (control, sound, clipboard) = (self.control, self.sound, self.clipboard_sharing);
+        let toolbar = if self.encoder.is_some() {
+            draw_toolbar(&mut buf, ww as i32, wh as i32, control, sound, clipboard)
+        } else {
+            Vec::new()
+        };
+        self.toolbar = toolbar;
         let _ = buf.present();
         if misfit && self.notice.is_none() {
             let n = self.monitor;
@@ -691,20 +697,15 @@ fn toolbar_buttons(control: bool, sound: bool, clipboard: bool) -> Vec<(ToolbarA
     ]
 }
 
-impl App {
-    /// Draw the toolbar over the remote screen and remember where the buttons
-    /// are, so a click can be routed to them.
-    fn draw_toolbar(&mut self, buf: &mut [u32], ww: i32, wh: i32) {
-        if self.encoder.is_none() {
-            self.toolbar.clear();
-            return;
-        }
+/// Draw the toolbar over the remote screen; returns the buttons and where
+/// they are, so a click can be routed to them.
+fn draw_toolbar(buf: &mut [u32], ww: i32, wh: i32, control: bool, sound: bool, clipboard: bool) -> Vec<ToolbarButton> {
         let px = 13;
         let pad = 6;
         let gap = 6;
         let height = 26;
         let mut canvas = Canvas::new(buf, ww, wh);
-        let buttons = toolbar_buttons(self.control, self.sound, self.clipboard_sharing);
+        let buttons = toolbar_buttons(control, sound, clipboard);
         // Measure the labels first so the bar gets the right width.
         let widths: Vec<i32> = buttons.iter().map(|(_, label, _)| canvas.measure(label, px)).collect();
         let total: i32 = widths.iter().sum::<i32>() + pad * 2 * buttons.len() as i32 + gap * (buttons.len() as i32 - 1);
@@ -724,9 +725,10 @@ impl App {
             placed.push(ToolbarButton { action: *action, rect: r, active: *active });
             x += r.w + gap;
         }
-        self.toolbar = placed;
-    }
+        placed
+}
 
+impl App {
     /// The toolbar button under the pointer, if any.
     fn toolbar_hit(&self, x: f64, y: f64) -> Option<ToolbarAction> {
         self.toolbar.iter().find(|b| b.rect.contains(x, y)).map(|b| b.action)
