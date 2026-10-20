@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 
 const HOST_VERSION: &str = "6.6.133";
 
+/// Frames that may be on the wire at the same time. Two is enough to hide a
+/// round trip without queueing stale frames on a slow link.
+pub const MAX_FRAMES_IN_FLIGHT: u32 = 2;
+
 /// Delay between a viewer frame acknowledgment and the next capture. The ack
 /// is the real backpressure (one frame in flight); an unchanged capture waits
 /// longer so an idle desktop is not captured continuously.
@@ -107,7 +111,10 @@ pub struct Core {
     pending_frame: Option<Frame>,
     last_frame: Option<Frame>,
     next_seq: i32,
-    waiting_ack: bool,
+    /// Frames sent to the viewer that it has not acknowledged yet. More than
+    /// one keeps the link busy: the next capture does not wait for the
+    /// acknowledgment, so a frame costs one round trip instead of two.
+    frames_in_flight: u32,
     capture_at: Option<Instant>,
     deadline: Option<Instant>,
     pacing: Pacing,
@@ -133,7 +140,7 @@ impl Core {
     pub fn new(password: &str, custom_proof: Option<String>) -> Self {
         Core {
             password: password.into(), custom_proof, throttle: Throttle::default(), peer: None, phase: Phase::None, tools_connected: false,
-            control: false, pending_frame: None, last_frame: None, next_seq: FIRST_FRAME_NUMBER, waiting_ack: false,
+            control: false, pending_frame: None, last_frame: None, next_seq: FIRST_FRAME_NUMBER, frames_in_flight: 0,
             capture_at: None, deadline: None, pacing: Pacing::STANDARD, frames_sent: 0, out: Vec::new(),
         }
     }
@@ -185,10 +192,11 @@ impl Core {
         match peer_tag(payload) {
             b"19" => self.end_viewer("The Windows computer disconnected."),
             b"20" => self.out.push(Action::Peer(route, encode::keepalive_reply())),
-            b"18" if self.phase == Phase::Streaming && self.waiting_ack => {
-                self.waiting_ack = false;
+            b"18" if self.phase == Phase::Streaming && self.frames_in_flight > 0 => {
+                // The viewer has applied a frame; the next capture is already
+                // scheduled, so only the count changes here.
+                self.frames_in_flight -= 1;
                 self.deadline = None;
-                self.capture_at = Some(now + self.pacing.delay(true));
             }
             b"32" if payload == b"32|||1" => {
                 self.end_viewer("The Windows viewer requested an unsupported screen color mode. Use 16-bit color.")
@@ -277,7 +285,9 @@ impl Core {
 
     /// True once when a capture should be taken now.
     pub fn take_capture_due(&mut self, now: Instant) -> bool {
-        if self.phase == Phase::Streaming && !self.waiting_ack && self.capture_at.is_some_and(|t| t <= now) {
+        if self.phase == Phase::Streaming && self.frames_in_flight < MAX_FRAMES_IN_FLIGHT
+            && self.capture_at.is_some_and(|t| t <= now)
+        {
             self.capture_at = None;
             return true;
         }
@@ -285,7 +295,7 @@ impl Core {
     }
 
     pub fn submit_frame(&mut self, frame: Frame, now: Instant) -> Result<()> {
-        if self.phase != Phase::Streaming || self.waiting_ack {
+        if self.phase != Phase::Streaming || self.frames_in_flight >= MAX_FRAMES_IN_FLIGHT {
             return Ok(());
         }
         if let Some(prev) = &self.last_frame {
@@ -314,7 +324,7 @@ impl Core {
         if resets_sequence(why) {
             self.next_seq = FIRST_FRAME_NUMBER;
         }
-        self.waiting_ack = false;
+        self.frames_in_flight = 0;
         self.capture_at = None;
         self.out.push(Action::ReleaseInput);
         self.deadline = Some(now + Duration::from_secs(20));
@@ -331,7 +341,7 @@ impl Core {
     }
 
     fn send_frame(&mut self, frame: Frame, now: Instant) -> Result<()> {
-        if self.phase != Phase::Streaming || self.waiting_ack {
+        if self.phase != Phase::Streaming || self.frames_in_flight >= MAX_FRAMES_IN_FLIGHT {
             return Ok(());
         }
         let Some(route) = self.peer.as_ref().map(|p| p.route) else { return Ok(()) };
@@ -343,8 +353,11 @@ impl Core {
             return Err("frame numbers exhausted".into());
         }
         self.next_seq += 1;
-        self.waiting_ack = true;
+        self.frames_in_flight += 1;
         self.last_frame = Some(frame);
+        // The next capture is scheduled now, not when the acknowledgment
+        // arrives: that is what keeps the pipeline full.
+        self.capture_at = Some(now + self.pacing.delay(true));
         self.deadline = Some(now + Duration::from_secs(20));
         self.out.push(Action::Peer(route, data));
         self.frames_sent += 1;
@@ -356,7 +369,7 @@ impl Core {
         self.phase = Phase::None;
         self.tools_connected = false;
         self.control = false;
-        self.waiting_ack = false;
+        self.frames_in_flight = 0;
         self.capture_at = None;
         self.deadline = None;
         self.pending_frame = None;
@@ -404,6 +417,28 @@ mod tests {
         assert_eq!((p.delay(true), p.delay(false)), (Duration::from_millis(40), Duration::from_millis(250)));
         assert!(!resets_sequence(Reinit::DisplayLayoutChange));
         assert!(resets_sequence(Reinit::FreshApproval) && resets_sequence(Reinit::ViewerRelogin));
+    }
+
+    #[test]
+    fn two_frames_may_be_on_the_wire_at_the_same_time() {
+        let mut core = Core::new("pw", None);
+        let now = Instant::now();
+        core.on_peer(&login_payload("pw", "2"), route(), now).unwrap();
+        core.approve(frame(1), true, now).unwrap();
+        core.on_peer(b"17", route(), now).unwrap();
+        core.out.clear();
+        // The first frame is still unacknowledged, yet the second one goes
+        // out: the capture no longer waits for the acknowledgment.
+        assert!(core.take_capture_due(now + Duration::from_millis(40)));
+        core.submit_frame(frame(2), now).unwrap();
+        assert_eq!(sent(&mut core).len(), 1);
+        assert!(core.take_capture_due(now + Duration::from_millis(80)));
+        core.submit_frame(frame(3), now).unwrap();
+        assert_eq!(sent(&mut core).len(), 1);
+        // The pipeline is full: no third frame until an acknowledgment.
+        assert!(!core.take_capture_due(now + Duration::from_secs(1)));
+        core.on_peer(b"18", route(), now).unwrap();
+        assert!(core.take_capture_due(now + Duration::from_secs(1)));
     }
 
     #[test]
@@ -474,9 +509,8 @@ mod tests {
         assert_eq!(parts[0], [1]);
         assert_eq!(parts[4], FIRST_FRAME_NUMBER.to_le_bytes());
 
-        // No capture until "18".
-        assert!(!core.take_capture_due(now + Duration::from_secs(1)));
-        core.on_peer(b"18", route(), now).unwrap();
+        // The next capture is scheduled when the frame goes out, not when
+        // the acknowledgment arrives: one round trip instead of two.
         assert!(!core.take_capture_due(now));
         let later = now + Duration::from_millis(40);
         assert!(core.take_capture_due(later));
@@ -487,6 +521,8 @@ mod tests {
         core.submit_frame(frame(2), later).unwrap();
         let parts_owned = sent(&mut core);
         assert_eq!(decode_multipart(&parts_owned[0]).unwrap()[4], (FIRST_FRAME_NUMBER + 1).to_le_bytes());
+        // The acknowledgment frees a slot in the pipeline.
+        core.on_peer(b"18", route(), later).unwrap();
 
         // View only: input dropped; with control: injected.
         core.on_peer(b"8|||512|||0|||10|||20", route(), now).unwrap();
@@ -524,7 +560,6 @@ mod tests {
         core.on_peer(&login_payload("pw", "2"), route(), now).unwrap();
         core.approve(frame(1), true, now).unwrap();
         core.on_peer(b"17", route(), now).unwrap();
-        core.on_peer(b"18", route(), now).unwrap();
         core.out.clear();
         let big = Frame { width: 4, height: 2, rgb555_bottom_up: vec![0; 16], ..Default::default() };
         assert!(core.take_capture_due(now + Duration::from_secs(1)));
