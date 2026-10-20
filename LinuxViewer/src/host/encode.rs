@@ -537,6 +537,22 @@ mod tests {
         assert_eq!(decompress(parts[2], bu.len()), expected);
     }
 
+    /// Every screen size up to 4K has to be encodable; bigger ones are
+    /// refused with a clear error.
+    #[test]
+    fn screen_sizes_up_to_4k_are_encoded() {
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            let frame = Frame { width: w, height: h, rgb555_bottom_up: vec![0; w * h * 2], ..Default::default() };
+            let payload = full_frame(&frame, 1, Compression::Zstandard);
+            assert!(payload.is_ok(), "{w}x{h}: {payload:?}");
+            let delta = delta_frame(&frame, &Frame { width: w, height: h, rgb555_bottom_up: vec![1; w * h * 2], ..Default::default() }, 1, None);
+            assert!(delta.is_ok(), "{w}x{h} delta: {delta:?}");
+        }
+        // Beyond the protocol limit.
+        let huge = Frame { width: 5120, height: 2880, rgb555_bottom_up: vec![0; 5120 * 2880 * 2], ..Default::default() };
+        assert_eq!(full_frame(&huge, 1, Compression::Zstandard), Err(EncodeError::SizeLimitExceeded));
+    }
+
     #[test]
     fn rejects_bad_geometry_length_version() {
         let frame = Frame { width: 4096, height: 2048, rgb555_bottom_up: vec![0; MAX_PAYLOAD], ..Default::default() };
