@@ -100,7 +100,7 @@ pub fn zpixmap_to_rgb555(data: &[u8], width: usize, rows: usize, f: &PixelFormat
             let row = &data[y * stride..y * stride + width * 4];
             let words: Vec<u16> = row.chunks_exact(4).map(|px| {
                 let p = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
-                ((p & 0xff) >> 3) | ((((p >> 8) & 0xff) >> 3) << 5) | ((((p >> 16) & 0xff) >> 3) << 10)
+                (((p & 0xff) >> 3) | ((((p >> 8) & 0xff) >> 3) << 5) | ((((p >> 16) & 0xff) >> 3) << 10)) as u16
             }).collect();
             let start = out.len();
             out.resize(start + width * 2, 0);
