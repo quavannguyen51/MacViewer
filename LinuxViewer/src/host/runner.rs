@@ -2,7 +2,7 @@
 //! and the capture/input workers around the `Core` state machine.
 
 use super::backend::{self, Backend, CaptureJob, InputJob};
-use super::encode::Frame;
+use super::encode::{self, Frame};
 use super::layout::{Layout, Selection};
 use super::login::{self, RelayAddress, RelayRequest};
 use super::session::{Action, Core, FramePayload, Pacing, Route};

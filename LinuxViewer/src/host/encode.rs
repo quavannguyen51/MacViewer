@@ -242,7 +242,8 @@ pub fn prepare_delta(current: &Frame, previous: &Frame) -> Option<Delta> {
         // Most of the screen changed: a full frame is not bigger.
         return None;
     }
-    Some(Delta { rects, pixels: rectangle_pixels(current, &rects) })
+    let pixels = rectangle_pixels(current, &rects);
+    Some(Delta { rects, pixels })
 }
 
 /// Compress the changed parts and wrap them into a command 1 message.

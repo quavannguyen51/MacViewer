@@ -181,11 +181,6 @@ impl Core {
         self.pacing
     }
 
-    /// The size of the last frame that was sent, in bytes.
-    pub fn last_frame_bytes(&self) -> usize {
-        self.last_frame_bytes
-    }
-
     /// Compress the screen with the trained dictionary or without it.
     pub fn set_dictionary(&mut self, on: bool) {
         self.dictionary = on;
