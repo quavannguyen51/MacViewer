@@ -149,7 +149,7 @@ fn remember(recents: &mut Vec<String>, id: &str) {
 }
 
 /// Load a system TTF font for antialiased text rendering.
-fn ui_font() -> &'static fontdue::Font {
+fn ui_font() -> Option<&'static fontdue::Font> {
     static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
     FONT.get_or_init(|| {
         const PATHS: &[&str] = &[
