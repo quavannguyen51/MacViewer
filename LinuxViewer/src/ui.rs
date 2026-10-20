@@ -227,6 +227,8 @@ struct App {
     toolbar: Vec<ToolbarButton>,
     /// The sound volume, as a step of `audio::VOLUME_LEVELS`.
     volume_step: usize,
+    /// How often the sound device was reopened after an error.
+    sound_retries: u32,
 }
 
 /// How often the local clipboard is checked for a change.
@@ -487,6 +489,7 @@ impl App {
 
     fn set_sound(&mut self, on: bool) {
         if on {
+            self.sound_retries = 0;
             match Player::new() {
                 Ok(p) => {
                     p.set_volume(self.volume());
@@ -1027,7 +1030,35 @@ impl App {
         }
     }
 
+    /// The sound device can be taken by another program or disappear. Say so
+    /// and open it again, so the sound comes back without the user noticing.
+    fn check_sound_device(&mut self) {
+        let Some(p) = &self.player else { return };
+        let errors = p.take_errors();
+        if errors.is_empty() {
+            return;
+        }
+        for e in &errors {
+            self.notify(format!("Sound stopped: {e}"));
+        }
+        self.player = None;
+        if self.sound_retries >= 3 {
+            self.notify("The sound device stays busy.".into());
+            return;
+        }
+        self.sound_retries += 1;
+        match Player::new() {
+            Ok(p) => {
+                p.set_volume(self.volume());
+                self.player = Some(p);
+                self.notify("The sound device was opened again.".into());
+            }
+            Err(e) => self.notify(format!("The sound device is busy: {e}")),
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.check_sound_device();
         // A coalesced pointer move is due: send it and wake the loop again.
         if let Some(due) = self.move_due {
             if Instant::now() >= due {
@@ -1271,7 +1302,7 @@ fn new_viewer(profile: Profile, partner_id: &str, password: &str, base: ConnectO
     App {
         session: None, pending: Some((profile, password.to_string())), proxy: Some(proxy), generation, done: false,
         clipboard: None, clipboard_sharing: false, clipboard_sharing_flag: Arc::new(AtomicBool::new(false)),
-        clipboard_watch: None, toolbar: Vec::new(), volume_step: 4,
+        clipboard_watch: None, toolbar: Vec::new(), volume_step: 4, sound_retries: 0,
         transfers: HashMap::new(),
         download_dir: base.download_dir.clone().unwrap_or(if downloads.is_dir() { downloads } else { home }),
         clipboard_at_start: base.clipboard, base,

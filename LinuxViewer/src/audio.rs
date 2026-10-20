@@ -235,6 +235,8 @@ pub struct Player {
     queue: Arc<Mutex<VecDeque<i16>>>,
     /// The output volume, 0.0 to 1.0, as f32 bits.
     volume: Arc<AtomicU32>,
+    /// Errors from the output device, for the window to show.
+    errors: std::sync::mpsc::Receiver<String>,
     _stream: cpal::Stream,
 }
 
@@ -261,9 +263,13 @@ impl Player {
         let step = SOURCE_RATE as f64 / rate as f64;
         let mut current = [0i16; 2];
         let mut following = [0i16; 2];
+        // The gain moves towards the wanted level instead of jumping, so
+        // changing the volume does not click.
+        let mut level = 1.0f32;
         let mut fill = move |out: &mut dyn FnMut(usize, f32), frames: usize| {
             let mut q = q.lock().unwrap();
-            let level = f32::from_bits(gain.load(Ordering::Relaxed));
+            let target = f32::from_bits(gain.load(Ordering::Relaxed));
+            level += (target - level) * 0.25;
             for f in 0..frames {
                 frac += step;
                 while frac >= 1.0 {
@@ -290,7 +296,13 @@ impl Player {
                 }
             }
         };
-        let err = |e| eprintln!("linuxviewer: audio: {e}");
+        // The device can be taken by another program, or disappear; the
+        // window then reports it and opens the device again.
+        let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+        let err = move |e: cpal::StreamError| {
+            eprintln!("linuxviewer: audio: {e}");
+            let _ = err_tx.send(e.to_string());
+        };
         let cfg: cpal::StreamConfig = config.config();
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => device.build_output_stream(&cfg, move |d: &mut [f32], _| {
@@ -308,7 +320,7 @@ impl Player {
             f => return Err(format!("Unsupported audio output format {f:?}.")),
         }.map_err(|e| e.to_string())?;
         stream.play().map_err(|e| e.to_string())?;
-        Ok(Player { queue, volume, _stream: stream })
+        Ok(Player { queue, volume, errors: err_rx, _stream: stream })
     }
 
     pub fn play(&self, samples: &[i16]) {
@@ -327,6 +339,11 @@ impl Player {
     /// Set the output volume, 0.0 to 1.0.
     pub fn set_volume(&self, volume: f32) {
         self.volume.store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// The errors of the output device since the last call.
+    pub fn take_errors(&self) -> Vec<String> {
+        self.errors.try_iter().collect()
     }
 }
 
