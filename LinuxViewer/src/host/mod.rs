@@ -72,7 +72,9 @@ impl Options {
             }
         }
         if o.pacing_ms.is_none() {
-            o.pacing_ms = std::env::var("LINUXVIEWER_PACING_MS").ok().and_then(|v| parse_pacing(&v).ok());
+            if let Some(value) = std::env::var("LINUXVIEWER_PACING_MS").ok().filter(|v| !v.trim().is_empty()) {
+                o.pacing_ms = Some(parse_pacing(&value)?);
+            }
         }
         Ok(o)
     }
