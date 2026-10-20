@@ -1043,7 +1043,7 @@ impl App {
         }
         self.player = None;
         if self.sound_retries >= 3 {
-            self.notify("The sound device stays busy.".into());
+            self.notify(String::from("The sound device stays busy."));
             return;
         }
         self.sound_retries += 1;
@@ -1051,7 +1051,7 @@ impl App {
             Ok(p) => {
                 p.set_volume(self.volume());
                 self.player = Some(p);
-                self.notify("The sound device was opened again.".into());
+                self.notify(String::from("The sound device was opened again."));
             }
             Err(e) => self.notify(format!("The sound device is busy: {e}")),
         }
