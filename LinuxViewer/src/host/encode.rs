@@ -400,20 +400,25 @@ mod tests {
         let before = pattern(w, h, None);
         let after = pattern(w, h, Some((100, 60)));
 
-        let full = full_frame(&after, 1, Compression::Zstandard).unwrap();
-        let delta = delta_frame(&after, &before, 1, None).unwrap();
+        let first = full_frame(&before, 1, Compression::Zstandard).unwrap();
+        let full = full_frame(&after, 2, Compression::Zstandard).unwrap();
+        let delta = delta_frame(&after, &before, 2, None).unwrap();
         // The delta carries only the changed part.
         assert!(delta.len() < full.len(), "delta {} full {}", delta.len(), full.len());
 
-        let paint = |payload: &[u8]| {
-            let parts = decode_multipart(payload).unwrap();
-            let refs: Vec<&[u8]> = parts.iter().copied().collect();
+        let paint = |payloads: &[&[u8]]| {
             let mut r = Renderer::with_options(&ScreenInit { width: w as u32, height: h as u32, tile_size: 16, ..Default::default() },
                                                 0, 0, Limits::default()).unwrap();
-            r.apply(&refs).unwrap();
+            for payload in payloads {
+                let parts = decode_multipart(payload).unwrap();
+                let refs: Vec<&[u8]> = parts.iter().copied().collect();
+                r.apply(&refs).unwrap();
+            }
             r.pixels().to_vec()
         };
-        assert_eq!(paint(&full), paint(&delta));
+        // Painting the first frame and then the delta must give the same
+        // picture as painting both full frames.
+        assert_eq!(paint(&[&first, &full]), paint(&[&first, &delta]));
     }
 
     /// The changed rectangles must cover every changed pixel.
