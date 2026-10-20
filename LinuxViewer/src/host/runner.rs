@@ -139,6 +139,7 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
     let mut ticket = 0u64;
     let mut in_flight: Option<(u64, Purpose)> = None;
     let mut stopping = false;
+    let mut last_frames_shown = 0u64;
 
     loop {
         let now = Instant::now();
@@ -303,6 +304,11 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
             }
         }
         core.tick(now);
+        // Show how much the last frame cost, so the delta is visible.
+        if core.frames_sent != last_frames_shown {
+            last_frames_shown = core.frames_sent;
+            eprintln!("Frame {}: {:.1} KB", core.frames_sent, core.last_frame_bytes() as f64 / 1024.0);
+        }
         if in_flight.is_none() && core.take_capture_due(now) {
             request_capture(Purpose::Stream, &mut in_flight, selection);
         }

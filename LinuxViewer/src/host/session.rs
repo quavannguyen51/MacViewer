@@ -123,6 +123,8 @@ pub struct Core {
     dictionary: bool,
     /// The frame for the pending approval was already requested.
     approval_requested: bool,
+    /// The size of the last frame that went out.
+    last_frame_bytes: usize,
     pub frames_sent: u64,
     pub out: Vec<Action>,
 }
@@ -146,7 +148,7 @@ impl Core {
         Core {
             password: password.into(), custom_proof, throttle: Throttle::default(), peer: None, phase: Phase::None, tools_connected: false,
             control: false, pending_frame: None, last_frame: None, next_seq: FIRST_FRAME_NUMBER, frames_in_flight: 0,
-            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, approval_requested: false, frames_sent: 0, out: Vec::new(),
+            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, approval_requested: false, last_frame_bytes: 0, frames_sent: 0, out: Vec::new(),
         }
     }
 
@@ -163,6 +165,11 @@ impl Core {
     /// The frame pacing in use.
     pub fn pacing(&self) -> Pacing {
         self.pacing
+    }
+
+    /// The size of the last frame that was sent, in bytes.
+    pub fn last_frame_bytes(&self) -> usize {
+        self.last_frame_bytes
     }
 
     /// Compress the screen with the trained dictionary or without it.
@@ -389,6 +396,7 @@ impl Core {
         // arrives: that is what keeps the pipeline full.
         self.capture_at = Some(now + self.pacing.delay(true));
         self.deadline = Some(now + Duration::from_secs(20));
+        self.last_frame_bytes = data.len();
         self.out.push(Action::Peer(route, data));
         self.frames_sent += 1;
         Ok(())
