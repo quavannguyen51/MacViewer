@@ -220,6 +220,44 @@ fn tile_changed(current: &Frame, previous: &Frame, stride: usize, x: usize, y: u
     false
 }
 
+/// The changed parts of a frame: the rectangles and their pixels, top-down
+/// and back to back, as the viewer expects them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delta {
+    pub rects: Vec<Rect>,
+    pub pixels: Vec<u8>,
+}
+
+/// Compare the frames and take the changed parts. `None` when nothing
+/// changed. This is the cheap half: comparing the tiles and copying the
+/// changed pixels, without the compression.
+pub fn prepare_delta(current: &Frame, previous: &Frame) -> Option<Delta> {
+    let rects = changed_rectangles(current, previous);
+    if rects.is_empty() {
+        return None;
+    }
+    let changed: usize = rects.iter().map(|r| r.w as usize * r.h as usize).sum();
+    let whole = current.width * current.height;
+    if changed * 2 >= whole {
+        // Most of the screen changed: a full frame is not bigger.
+        return None;
+    }
+    Some(Delta { rects, pixels: rectangle_pixels(current, &rects) })
+}
+
+/// Compress the changed parts and wrap them into a command 1 message.
+pub fn compress_delta(delta: &Delta, sequence: i32, dictionary: Option<&[u8]>) -> std::result::Result<Vec<u8>, EncodeError> {
+    let max_compressed = MAX_PAYLOAD - (44 + 1 + 8 + 4);
+    let compressed = compress(&delta.pixels, max_compressed, dictionary)?;
+    let mut words = Vec::with_capacity(delta.rects.len() * 8);
+    for r in &delta.rects {
+        for v in [r.x, r.y, r.w, r.h] {
+            words.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    Ok(encode_multipart(&[&[1], &words, &compressed, &[], &long(sequence), &[], &[], &[], &[], &[], &[]]))
+}
+
 /// The pixels of the rectangles, top-down and back to back, as the viewer
 /// expects them.
 fn rectangle_pixels(frame: &Frame, rects: &[Rect]) -> Vec<u8> {
@@ -240,26 +278,10 @@ fn rectangle_pixels(frame: &Frame, rects: &[Rect]) -> Vec<u8> {
 /// `previous` must have the same layout. Falls back to the full frame when
 /// almost everything changed: that is smaller and simpler.
 pub fn delta_frame(current: &Frame, previous: &Frame, sequence: i32, dictionary: Option<&[u8]>) -> std::result::Result<Vec<u8>, EncodeError> {
-    let rects = changed_rectangles(current, previous);
-    if rects.is_empty() {
-        return full_frame_with(current, sequence, Compression::Zstandard, dictionary);
+    match prepare_delta(current, previous) {
+        Some(delta) => compress_delta(&delta, sequence, dictionary),
+        None => full_frame_with(current, sequence, Compression::Zstandard, dictionary),
     }
-    let changed: usize = rects.iter().map(|r| r.w as usize * r.h as usize).sum();
-    let whole = current.width * current.height;
-    if changed * 2 >= whole {
-        // Most of the screen changed: a full frame is not bigger.
-        return full_frame_with(current, sequence, Compression::Zstandard, dictionary);
-    }
-    let pixels = rectangle_pixels(current, &rects);
-    let max_compressed = MAX_PAYLOAD - (44 + 1 + 8 + 4);
-    let compressed = compress(&pixels, max_compressed, dictionary)?;
-    let mut words = Vec::with_capacity(rects.len() * 8);
-    for r in &rects {
-        for v in [r.x, r.y, r.w, r.h] {
-            words.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    Ok(encode_multipart(&[&[1], &words, &compressed, &[], &long(sequence), &[], &[], &[], &[], &[], &[]]))
 }
 
 /// Reply to the viewer's ASCII "20" keepalive.

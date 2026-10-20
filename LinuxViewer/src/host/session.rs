@@ -75,6 +75,10 @@ pub struct Request {
 #[derive(Debug, PartialEq)]
 pub enum Action {
     Peer(Route, Vec<u8>),
+    /// A screen frame that still has to be compressed. The compression runs
+    /// on its own thread, so the host keeps answering the viewer while it
+    /// works.
+    Frame { route: Route, sequence: i32, payload: FramePayload },
     Status(String),
     Prompt(Request),
     Connected(Request),
@@ -85,6 +89,15 @@ pub enum Action {
     Tool(Vec<u8>),
     ReleaseInput,
     Ended(String),
+}
+
+/// What has to be compressed for a frame.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FramePayload {
+    /// The whole screen.
+    Full(encode::Frame),
+    /// Only the parts that changed.
+    Delta(encode::Delta),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,8 +139,6 @@ pub struct Core {
     dictionary: bool,
     /// The frame for the pending approval was already requested.
     approval_requested: bool,
-    /// The size of the last frame that went out.
-    last_frame_bytes: usize,
     pub frames_sent: u64,
     pub out: Vec<Action>,
 }
@@ -151,7 +162,7 @@ impl Core {
         Core {
             password: password.into(), custom_proof, throttle: Throttle::default(), peer: None, phase: Phase::None, tools_connected: false,
             control: false, pending_frame: None, last_frame: None, next_seq: FIRST_FRAME_NUMBER, frames_in_flight: 0,
-            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, approval_requested: false, last_frame_bytes: 0, frames_sent: 0, out: Vec::new(),
+            capture_at: None, deadline: None, pacing: Pacing::STANDARD, dictionary: false, approval_requested: false, frames_sent: 0, out: Vec::new(),
         }
     }
 
@@ -381,17 +392,19 @@ impl Core {
             return self.initialize(frame, self.control, Reinit::DisplayLayoutChange, now);
         }
         // Only the parts of the screen that changed are sent; the viewer
-        // keeps the rest of the picture.
-        let dictionary = self.dictionary.then_some(crate::screen::SCREEN_DICTIONARY);
-        let data = match self.last_frame.as_ref() {
-            Some(previous) if previous.same_layout(&frame) => {
-                encode::delta_frame(&frame, previous, self.next_seq, dictionary)?
-            }
-            _ => encode::full_frame_with(&frame, self.next_seq, Compression::Zstandard, dictionary)?,
+        // keeps the rest of the picture. The compression itself happens on
+        // the encoder thread.
+        let payload = match self.last_frame.as_ref() {
+            Some(previous) if previous.same_layout(&frame) => match encode::prepare_delta(&frame, previous) {
+                Some(delta) => FramePayload::Delta(delta),
+                None => FramePayload::Full(frame.clone()),
+            },
+            _ => FramePayload::Full(frame.clone()),
         };
         if self.next_seq == i32::MAX {
             return Err("frame numbers exhausted".into());
         }
+        let sequence = self.next_seq;
         self.next_seq += 1;
         self.frames_in_flight += 1;
         self.last_frame = Some(frame);
@@ -399,8 +412,7 @@ impl Core {
         // arrives: that is what keeps the pipeline full.
         self.capture_at = Some(now + self.pacing.delay(true));
         self.deadline = Some(now + Duration::from_secs(20));
-        self.last_frame_bytes = data.len();
-        self.out.push(Action::Peer(route, data));
+        self.out.push(Action::Frame { route, sequence, payload });
         self.frames_sent += 1;
         Ok(())
     }

@@ -5,7 +5,7 @@ use super::backend::{self, Backend, CaptureJob, InputJob};
 use super::encode::Frame;
 use super::layout::{Layout, Selection};
 use super::login::{self, RelayAddress, RelayRequest};
-use super::session::{Action, Core, Pacing, Route};
+use super::session::{Action, Core, FramePayload, Pacing, Route};
 use super::tools::Tools;
 use super::Options;
 use crate::command::CommandConnection;
@@ -19,6 +19,39 @@ use std::time::{Duration, Instant};
 
 const RELAY_PORT: u16 = 443;
 
+/// A frame waiting to be compressed.
+enum EncodeJob {
+    Frame { route: Route, sequence: i32, payload: FramePayload },
+}
+
+/// Compresses the screen frames on its own thread, so the host keeps
+/// answering the viewer while zstd works.
+fn spawn_encoder(events: mpsc::Sender<Event>, dictionary: bool) -> mpsc::Sender<EncodeJob> {
+    let (jobs, incoming) = mpsc::channel::<EncodeJob>();
+    let _ = std::thread::Builder::new().name("linuxviewer-encoder".into()).spawn(move || {
+        while let Ok(job) = incoming.recv() {
+            let EncodeJob::Frame { route, sequence, payload } = job;
+            let dict = dictionary.then_some(crate::screen::SCREEN_DICTIONARY);
+            let data = match payload {
+                FramePayload::Full(frame) => encode::full_frame_with(&frame, sequence, encode::Compression::Zstandard, dict),
+                FramePayload::Delta(delta) => encode::compress_delta(&delta, sequence, dict),
+            };
+            match data {
+                Ok(bytes) => {
+                    if events.send(Event::Encoded(route, bytes)).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Screen encoding failed: {e}");
+                    return;
+                }
+            }
+        }
+    });
+    jobs
+}
+
 pub(crate) enum Event {
     Command(Vec<u8>),
     CommandClosed(String),
@@ -27,6 +60,8 @@ pub(crate) enum Event {
     Line(String),
     StdinClosed,
     Captured(u64, Result<Frame>),
+    /// A screen frame that the encoder thread compressed.
+    Encoded(Route, Vec<u8>),
     Interrupt,
     /// The clipboard watcher has new local text for the viewer.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -109,6 +144,7 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
 
     let layout = Arc::new(Mutex::new(None::<Layout>));
     let capture = backend::spawn_capture(backend.capturer, layout.clone(), tx.clone(), Event::Captured);
+    let encoder = spawn_encoder(tx.clone(), opts.dictionary);
     let input = backend::spawn_input(backend.injector, layout);
     let mut tools = Tools::new(opts, tx.clone());
 
@@ -141,6 +177,7 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
     let mut in_flight: Option<(u64, Purpose)> = None;
     let mut stopping = false;
     let mut last_frames_shown = 0u64;
+    let mut last_frame_bytes = 0usize;
 
     loop {
         let now = Instant::now();
@@ -201,7 +238,7 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
                 }
                 Event::CommandClosed(e) => {
                     core.end_viewer("The host stopped.");
-                    flush(&mut core, &relay, &input, &mut tools, opts);
+                    flush(&mut core, &relay, &input, &mut tools, opts, &encoder);
                     return Err(format!("The UltraViewer command channel closed: {e}").into());
                 }
                 Event::Relay(generation, bytes) => {
@@ -230,10 +267,16 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
                         core.end_viewer(&format!("The incoming relay disconnected: {e}"));
                     }
                 }
-                Event::Captured(t, result) => {
+                Event::Encoded(route, bytes) => {
+                if let Some(w) = relay.as_ref().and_then(|r| r.writer.as_ref()) {
+                    send_peer(w, route, &bytes);
+                }
+                last_frame_bytes = bytes.len();
+            }
+            Event::Captured(t, result) => {
                     // Hand the input that already arrived to the desktop before
                     // encoding this frame: zstd must not delay a click.
-                    flush(&mut core, &relay, &input, &mut tools, opts);
+                    flush(&mut core, &relay, &input, &mut tools, opts, &encoder);
                     if let Some((_, purpose)) = in_flight.filter(|(id, _)| *id == t) {
                         in_flight = None;
                         match (purpose, result) {
@@ -308,7 +351,7 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
         // Show how much the last frame cost, so the delta is visible.
         if core.frames_sent != last_frames_shown {
             last_frames_shown = core.frames_sent;
-            eprintln!("Frame {}: {:.1} KB", core.frames_sent, core.last_frame_bytes() as f64 / 1024.0);
+            eprintln!("Frame {}: {:.1} KB", core.frames_sent, last_frame_bytes as f64 / 1024.0);
         }
         if in_flight.is_none() && core.take_capture_due(now) {
             request_capture(Purpose::Stream, &mut in_flight, selection);
@@ -321,7 +364,7 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
             }
         }
 
-        flush(&mut core, &relay, &input, &mut tools, opts);
+        flush(&mut core, &relay, &input, &mut tools, opts, &encoder);
         if let (Some(route), Some(w)) = (core.tools_route(), relay.as_ref().and_then(|r| r.writer.as_ref())) {
             for payload in tools.outgoing(route) {
                 send_peer(w, route, &payload);
@@ -345,7 +388,8 @@ fn send_peer(w: &FrameWriter, route: Route, bytes: &[u8]) {
     }
 }
 
-fn flush(core: &mut Core, relay: &Option<Relay>, input: &mpsc::Sender<InputJob>, tools: &mut Tools, opts: &Options) {
+fn flush(core: &mut Core, relay: &Option<Relay>, input: &mpsc::Sender<InputJob>, tools: &mut Tools, opts: &Options,
+         encoder: &mpsc::Sender<EncodeJob>) {
     let writer = relay.as_ref().and_then(|r| r.writer.as_ref());
     for action in std::mem::take(&mut core.out) {
         match action {
@@ -353,6 +397,10 @@ fn flush(core: &mut Core, relay: &Option<Relay>, input: &mpsc::Sender<InputJob>,
                 if let Some(w) = writer {
                     send_peer(w, route, &bytes);
                 }
+            }
+            Action::Frame { route, sequence, payload } => {
+                // The compression runs on the encoder thread.
+                let _ = encoder.send(EncodeJob::Frame { route, sequence, payload });
             }
             Action::Status(s) => eprintln!("{s}"),
             Action::Prompt(r) => {
