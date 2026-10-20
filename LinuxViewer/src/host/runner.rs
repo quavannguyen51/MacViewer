@@ -5,7 +5,7 @@ use super::backend::{self, Backend, CaptureJob, InputJob};
 use super::encode::Frame;
 use super::layout::{Layout, Selection};
 use super::login::{self, RelayAddress, RelayRequest};
-use super::session::{Action, Core, Route};
+use super::session::{Action, Core, Pacing, Route};
 use super::tools::Tools;
 use super::Options;
 use crate::command::CommandConnection;
@@ -119,6 +119,15 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
     eprintln!("Waiting for a Windows UltraViewer to connect (backend: {}). Ctrl-C to stop.", backend.name);
 
     let mut core = Core::new(&registration.password, master_proof);
+    let pacing = match opts.pacing_ms {
+        Some(ms) => {
+            let p = Pacing::with_changed_delay(ms);
+            eprintln!("Frame pacing: {} ms between frames ({}).", p.changed.as_millis(), if ms == 0 { "as fast as the viewer allows" } else { "custom" });
+            p
+        }
+        None => Pacing::STANDARD,
+    };
+    core.set_pacing(pacing);
     let mut relay: Option<Relay> = None;
     let mut relay_generation = 0u64;
     let mut next_keepalive = Instant::now() + Duration::from_secs(60);

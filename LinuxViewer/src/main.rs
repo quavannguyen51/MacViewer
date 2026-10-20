@@ -12,12 +12,13 @@ const USAGE: &str = "usage:
   linuxviewer snapshot <ID> --password P -o out.png [--frames N] [--timeout S] [--no-lan]
                                             connect headless and save the remote screen as PNG
   linuxviewer host [--auto-approve control|view] [--monitor N|all] [--clipboard]
-                   [--backend x11|wayland|auto] [--download-dir PATH]
+                   [--backend x11|wayland|auto] [--download-dir PATH] [--pacing MS]
                                             let UltraViewer users connect to this computer
   linuxviewer id [--host]                   register and print this computer's ID and password
   linuxviewer master-password [--clear]     set or remove the hosting master password
 
-environment: LINUXVIEWER_NAME (display name), LINUXVIEWER_INSECURE_RELAY=1 (skip relay certificate checks)";
+environment: LINUXVIEWER_NAME (display name), LINUXVIEWER_INSECURE_RELAY=1 (skip relay certificate checks),
+             LINUXVIEWER_PACING_MS (milliseconds between frames while hosting)";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

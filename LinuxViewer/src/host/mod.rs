@@ -37,10 +37,13 @@ pub struct Options {
     pub backend: BackendChoice,
     /// Where received files go (default: XDG download dir or ~/Downloads).
     pub download_dir: Option<PathBuf>,
+    /// Milliseconds to wait between frames; 0 sends them as fast as the
+    /// viewer acknowledges them. None keeps the UltraViewer default (40 ms).
+    pub pacing_ms: Option<u64>,
 }
 
 pub const USAGE: &str = "linuxviewer host [--auto-approve control|view] [--monitor N|all] [--clipboard] \
-                         [--backend auto|x11|wayland] [--download-dir PATH]";
+                         [--backend auto|x11|wayland] [--download-dir PATH] [--pacing MS]";
 
 impl Options {
     /// Parses the arguments after `host`.
@@ -57,6 +60,7 @@ impl Options {
                 }),
                 "--monitor" => o.selection = Selection::parse(&value(arg)?)?,
                 "--clipboard" => o.clipboard = true,
+                "--pacing" => o.pacing_ms = Some(parse_pacing(&value(arg)?)?),
                 "--backend" => o.backend = match value(arg)?.as_str() {
                     "auto" => BackendChoice::Auto,
                     "x11" => BackendChoice::X11,
@@ -67,8 +71,20 @@ impl Options {
                 other => return Err(format!("unknown host option {other:?}\nusage: {USAGE}").into()),
             }
         }
+        if o.pacing_ms.is_none() {
+            o.pacing_ms = std::env::var("LINUXVIEWER_PACING_MS").ok().and_then(|v| parse_pacing(&v).ok());
+        }
         Ok(o)
     }
+}
+
+/// A frame delay in milliseconds, 0 to 1000.
+fn parse_pacing(value: &str) -> Result<u64> {
+    let ms: u64 = value.trim().parse().map_err(|_| format!("--pacing takes milliseconds, not {value:?}"))?;
+    if ms > 1000 {
+        return Err("--pacing takes at most 1000 milliseconds".into());
+    }
+    Ok(ms)
 }
 
 /// Register, print ID/password, and serve viewers until Ctrl-C.
@@ -136,10 +152,19 @@ mod tests {
     fn parses_host_options() {
         let o = Options::parse(&args("--auto-approve view --monitor 2 --clipboard --backend wayland --download-dir /tmp/x")).unwrap();
         assert_eq!(o, Options { auto_approve: Some(false), selection: Selection::Display(2), clipboard: true,
-                                backend: BackendChoice::Wayland, download_dir: Some("/tmp/x".into()) });
+                                backend: BackendChoice::Wayland, download_dir: Some("/tmp/x".into()), pacing_ms: None });
         assert_eq!(Options::parse(&[]).unwrap(), Options::default());
         assert_eq!(Options::parse(&args("--auto-approve control")).unwrap().auto_approve, Some(true));
         for bad in ["--auto-approve", "--auto-approve yes", "--monitor 0", "--backend mir", "--bogus"] {
+            assert!(Options::parse(&args(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_the_frame_pacing() {
+        assert_eq!(Options::parse(&args("--pacing 0")).unwrap().pacing_ms, Some(0));
+        assert_eq!(Options::parse(&args("--pacing 16")).unwrap().pacing_ms, Some(16));
+        for bad in ["--pacing", "--pacing fast", "--pacing -1", "--pacing 5000"] {
             assert!(Options::parse(&args(bad)).is_err(), "{bad}");
         }
     }

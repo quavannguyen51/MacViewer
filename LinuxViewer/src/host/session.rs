@@ -22,6 +22,18 @@ pub struct Pacing {
 
 impl Pacing {
     pub const STANDARD: Pacing = Pacing { changed: Duration::from_millis(40), unchanged: Duration::from_millis(250) };
+
+    /// A custom delay between frames, in milliseconds. 0 means "no waiting":
+    /// the next frame is captured as soon as the viewer acknowledges the
+    /// previous one, which is as fast as the link allows.
+    pub fn with_changed_delay(ms: u64) -> Pacing {
+        let changed = Duration::from_millis(ms);
+        // An idle desktop keeps the slow rate, but never slower than the
+        // changed rate times four.
+        let unchanged = changed.saturating_mul(4).max(Duration::from_millis(250));
+        Pacing { changed, unchanged }
+    }
+
     pub fn delay(&self, frame_changed: bool) -> Duration {
         if frame_changed { self.changed } else { self.unchanged }
     }
@@ -130,6 +142,16 @@ impl Core {
     pub fn has_viewer(&self) -> bool { self.peer.is_some() }
     pub fn streaming(&self) -> bool { self.phase == Phase::Streaming }
     pub fn control_allowed(&self) -> bool { self.control }
+
+    /// Replace the frame pacing (how long the host waits between frames).
+    pub fn set_pacing(&mut self, pacing: Pacing) {
+        self.pacing = pacing;
+    }
+
+    /// The frame pacing in use.
+    pub fn pacing(&self) -> Pacing {
+        self.pacing
+    }
 
     /// Route of the viewer that may use chat/clipboard/files.
     pub fn tools_route(&self) -> Option<Route> {
@@ -382,6 +404,24 @@ mod tests {
         assert_eq!((p.delay(true), p.delay(false)), (Duration::from_millis(40), Duration::from_millis(250)));
         assert!(!resets_sequence(Reinit::DisplayLayoutChange));
         assert!(resets_sequence(Reinit::FreshApproval) && resets_sequence(Reinit::ViewerRelogin));
+    }
+
+    #[test]
+    fn custom_pacing_can_go_down_to_zero() {
+        let fast = Pacing::with_changed_delay(0);
+        assert_eq!(fast.delay(true), Duration::from_millis(0));
+        assert_eq!(fast.delay(false), Duration::from_millis(250));
+        let quick = Pacing::with_changed_delay(16);
+        assert_eq!(quick.delay(true), Duration::from_millis(16));
+        // An idle desktop never gets slower than the changed rate times four.
+        assert!(quick.delay(false) >= quick.delay(true) * 4);
+    }
+
+    #[test]
+    fn pacing_can_be_set_on_the_session() {
+        let mut core = Core::new("pw", None);
+        core.set_pacing(Pacing::with_changed_delay(0));
+        assert!(core.pacing().delay(true).is_zero());
     }
 
     #[test]

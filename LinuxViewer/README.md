@@ -44,10 +44,17 @@ The binary is `target/release/linuxviewer`.
 ```sh
 linuxviewer connect 123456789          # asks for the password
 linuxviewer connect 123456789 --password 1234
-linuxviewer host                       # share this X11 desktop
+linuxviewer host                       # share this X11 or Wayland desktop
+linuxviewer host --pacing 0            # send frames as fast as the viewer allows
 linuxviewer id [--host]                # register and print this machine's ID/password
 linuxviewer master-password [--clear]  # set a fixed password for hosting
 ```
+
+`--pacing MS` sets how long the host waits between frames while hosting
+(default 40 ms, the UltraViewer default; 0 means "as fast as the viewer
+acknowledges"). The same value can be set with the `LINUXVIEWER_PACING_MS`
+environment variable, which the window's "Share this screen" button also
+picks up.
 
 In the viewer window:
 
