@@ -28,6 +28,10 @@ type Surface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
 
 const HELP: &str = "F12 Control · F11 Sound · F9 Monitor · F8 Chat · F7 Clipboard · F6 Zoom · drop files to send · F10 Help";
 const NOTICE_TIME: Duration = Duration::from_secs(8);
+/// Pointer moves are coalesced into one packet per interval (UltraViewer
+/// merges them the same way): only the newest position matters, so a burst of
+/// moves cannot queue up in front of a click.
+const MOVE_INTERVAL: Duration = Duration::from_millis(12);
 
 /// Remote canvas rectangle shown in the window: all monitors or one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -208,6 +212,12 @@ struct App {
     /// Chat compose buffer while F8 chat mode is active.
     compose: Option<String>,
     notice: Option<(String, Instant)>,
+    /// Newest pointer move, not sent yet (coalesced, see MOVE_INTERVAL).
+    pending_move: Option<Vec<u8>>,
+    /// When the last pointer move went out.
+    last_move: Instant,
+    /// When the coalesced pointer move is due.
+    move_due: Option<Instant>,
 }
 
 impl App {
@@ -293,6 +303,9 @@ impl App {
     }
 
     fn release_all(&mut self) {
+        // A pending move must not be sent after the keys are released.
+        self.pending_move = None;
+        self.move_due = None;
         if let Some(e) = self.encoder.as_mut() {
             let out = e.release_all();
             self.send(out);
@@ -347,6 +360,36 @@ impl App {
     fn redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// Queue a pointer move. Only the newest position is kept, and it goes
+    /// out at most every MOVE_INTERVAL, so a fast mouse cannot flood the
+    /// connection and delay the click that follows it.
+    fn queue_move(&mut self, payload: Vec<u8>) {
+        self.pending_move = Some(payload);
+        let now = Instant::now();
+        if self.last_move.elapsed() >= MOVE_INTERVAL {
+            self.flush_move(now);
+        } else {
+            self.move_due = Some(self.last_move + MOVE_INTERVAL);
+        }
+    }
+
+    /// Send the coalesced pointer move, if there is one.
+    fn flush_move(&mut self, now: Instant) {
+        if let Some(payload) = self.pending_move.take() {
+            self.last_move = now;
+            self.move_due = None;
+            self.send(vec![payload]);
+        }
+    }
+
+    /// Send the coalesced pointer move before anything else: a button or a key
+    /// must land at the position the user actually clicked.
+    fn flush_move_now(&mut self) {
+        if self.pending_move.is_some() {
+            self.flush_move(Instant::now());
         }
     }
 
@@ -709,14 +752,27 @@ impl App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A coalesced pointer move is due: send it and wake the loop again.
+        if let Some(due) = self.move_due {
+            if Instant::now() >= due {
+                self.flush_move(Instant::now());
+            }
+        }
+        let mut wake: Option<Instant> = None;
         match self.notice {
             Some((_, at)) if at.elapsed() >= NOTICE_TIME => {
                 self.notice = None;
                 self.update_title();
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
-            Some((_, at)) => event_loop.set_control_flow(ControlFlow::WaitUntil(at + NOTICE_TIME)),
+            Some((_, at)) => wake = Some(at + NOTICE_TIME),
             None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+        if let Some(due) = self.move_due {
+            wake = Some(wake.map_or(due, |w| w.min(due)));
+        }
+        if let Some(at) = wake {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(at));
         }
     }
 
@@ -778,7 +834,7 @@ impl App {
                 if self.forwarding() {
                     if let Some((x, y)) = self.remote_pointer() {
                         let out = self.encoder.as_mut().unwrap().pointer_moved(x, y);
-                        self.send(out);
+                        self.queue_move(out);
                     }
                 }
             }
@@ -793,6 +849,8 @@ impl App {
                     MouseButton::Middle => 2,
                     _ => return,
                 };
+                // The click goes out at once, after the pending move.
+                self.flush_move_now();
                 let pos = self.remote_pointer();
                 let out = self.encoder.as_mut().unwrap().pointer_button(b, state == ElementState::Pressed, pos);
                 self.send(out);
@@ -806,6 +864,7 @@ impl App {
                     MouseScrollDelta::PixelDelta(p) => p.y / 40.0,
                 };
                 let out = self.encoder.as_mut().unwrap().scroll(lines);
+                self.flush_move_now();
                 self.send(out);
             }
             WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
@@ -865,11 +924,13 @@ impl App {
                     enc.modifiers(m);
                 }
                 let out = enc.key(code, pressed, text);
+                self.flush_move_now();
                 self.send(out);
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if self.forwarding() {
                     let out = self.encoder.as_mut().unwrap().text(&text);
+                    self.flush_move_now();
                     self.send(out);
                 }
             }
@@ -921,6 +982,7 @@ fn new_viewer(profile: Profile, partner_id: &str, password: &str, base: ConnectO
         monitors: Vec::new(), monitor: 0, layout: None, zoom: None, title_after_draw: false, pan_focus: (0.5, 0.5), pointer: None, modifiers: ModifiersState::empty(),
         cursor: CursorState::default(), native_cursors: HashMap::new(), shown_cursor: None,
         audio_decoder: G722Decoder::new(), player: None, sound: false, compose: None, notice: None,
+        pending_move: None, last_move: Instant::now(), move_due: None,
     }
 }
 

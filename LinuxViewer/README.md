@@ -17,11 +17,13 @@ Linux counterpart of MacViewer and speaks the same protocol, ported from
   through VK_PACKET), and the remote cursor shape.
 - **Host:** let a Windows UltraViewer user view or control this Linux
   desktop. You approve each connection in the terminal. Supports a fixed master
-  password and a lockout after 5 wrong passwords. **X11 only** for now: under
-  Wayland, log in to an X11 session.
-
-Not supported yet: chat, clipboard, file transfer, audio, LAN direct and
-Wayland hosting.
+  password and a lockout after 5 wrong passwords. **X11 and Wayland** (Wayland
+  through xdg-desktop-portal and PipeWire).
+- **Chat** (<kbd>F8</kbd>), **clipboard sharing** (<kbd>F7</kbd>), **file
+  transfer** (drop a file on the window to send it) and **sound from the
+  partner** (<kbd>F11</kbd>, G.722).
+- **LAN direct:** when both computers are on the same network the session
+  goes peer to peer instead of through the relay.
 
 ## Build
 
@@ -52,6 +54,12 @@ In the viewer window:
 | Key | Action |
 |---|---|
 | <kbd>F12</kbd> or <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd> | Turn Control on/off |
+| <kbd>F6</kbd> | Zoom: fit, 100 %, 200 % |
+| <kbd>F7</kbd> | Clipboard sharing on/off |
+| <kbd>F8</kbd> | Chat |
+| <kbd>F9</kbd> | Next monitor |
+| <kbd>F10</kbd> | Show the shortcuts |
+| <kbd>F11</kbd> | Sound on/off |
 | Close the window | Disconnect |
 
 While hosting, a viewer that connects is shown in the terminal:

@@ -144,115 +144,128 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
             *in_flight = Some((ticket, purpose));
             let _ = capture.send(CaptureJob { ticket, selection });
         };
-        match event {
-            Some(Event::Command(payload)) => {
-                let payload = payload.as_slice();
-                let tag = system_tag(payload);
-                if tag == b"11" || tag == b"17" {
-                    let Some(request) = login::relay_request(payload, &lists.0, &lists.1) else {
-                        eprintln!("Ignored a malformed relay request.");
-                        continue;
-                    };
-                    if let Some(r) = relay.as_ref().filter(|r| r.request == request && r.address.is_some()) {
-                        send_command(&login::availability(&r.request, r.address.unwrap()))?;
-                    } else if !core.has_viewer() {
-                        if let Some(old) = relay.take() {
-                            if let Some(w) = old.writer { w.shutdown(); }
-                        }
-                        relay_generation += 1;
-                        eprintln!("Preparing the incoming Windows connection…");
-                        relay = Some(open_relay(&request, relay_generation, &tx));
-                    }
-                }
-            }
-            Some(Event::CommandClosed(e)) => {
-                core.end_viewer("The host stopped.");
-                flush(&mut core, &relay, &input, &mut tools, opts);
-                return Err(format!("The UltraViewer command channel closed: {e}").into());
-            }
-            Some(Event::Relay(generation, bytes)) => {
-                let Some(r) = relay.as_mut().filter(|r| r.generation == generation) else { continue };
-                match wire::decode_envelope(&bytes) {
-                    Ok(Envelope::System(p)) if p.starts_with(b"0:") => {
-                        if let Some(address) = login::relay_address(p) {
-                            r.address = Some(address);
-                            r.address_deadline = None;
-                            send_command(&login::availability(&r.request, address))?;
-                            eprintln!("Waiting for the Windows computer's login…");
+        // Everything that is ready is handled in one turn, but the captured
+        // frame goes last: encoding it is the expensive part, and a click
+        // that already arrived must not wait behind zstd.
+        let mut events: Vec<Event> = event.into_iter().collect();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        events.sort_by_key(|e| matches!(e, Event::Captured(..)));
+        for event in events {
+            match event {
+                Event::Command(payload) => {
+                    let payload = payload.as_slice();
+                    let tag = system_tag(payload);
+                    if tag == b"11" || tag == b"17" {
+                        let Some(request) = login::relay_request(payload, &lists.0, &lists.1) else {
+                            eprintln!("Ignored a malformed relay request.");
+                            continue;
+                        };
+                        if let Some(r) = relay.as_ref().filter(|r| r.request == request && r.address.is_some()) {
+                            send_command(&login::availability(&r.request, r.address.unwrap()))?;
+                        } else if !core.has_viewer() {
+                            if let Some(old) = relay.take() {
+                                if let Some(w) = old.writer { w.shutdown(); }
+                            }
+                            relay_generation += 1;
+                            eprintln!("Preparing the incoming Windows connection…");
+                            relay = Some(open_relay(&request, relay_generation, &tx));
                         }
                     }
-                    Ok(Envelope::Forward { ip, port, payload }) => {
-                        let unicode = bytes[1] != 0;
-                        if let Some(decoded) = login::peer_payload(payload, unicode) {
-                            core.on_peer(&decoded, Route { address: ip, port }, now)?;
+                }
+                Event::CommandClosed(e) => {
+                    core.end_viewer("The host stopped.");
+                    flush(&mut core, &relay, &input, &mut tools, opts);
+                    return Err(format!("The UltraViewer command channel closed: {e}").into());
+                }
+                Event::Relay(generation, bytes) => {
+                    let Some(r) = relay.as_mut().filter(|r| r.generation == generation) else { continue };
+                    match wire::decode_envelope(&bytes) {
+                        Ok(Envelope::System(p)) if p.starts_with(b"0:") => {
+                            if let Some(address) = login::relay_address(p) {
+                                r.address = Some(address);
+                                r.address_deadline = None;
+                                send_command(&login::availability(&r.request, address))?;
+                                eprintln!("Waiting for the Windows computer's login…");
+                            }
                         }
-                    }
-                    _ => {}
-                }
-            }
-            Some(Event::RelayClosed(generation, e)) => {
-                if relay.as_ref().is_some_and(|r| r.generation == generation) {
-                    relay = None;
-                    core.end_viewer(&format!("The incoming relay disconnected: {e}"));
-                }
-            }
-            Some(Event::Captured(t, result)) => {
-                if let Some((_, purpose)) = in_flight.filter(|(id, _)| *id == t) {
-                    in_flight = None;
-                    match (purpose, result) {
-                        (Purpose::Approve { control }, Ok(frame)) if core.awaiting_approval() => core.approve(frame, control, now)?,
-                        (Purpose::Stream, Ok(frame)) => core.submit_frame(frame, now)?,
-                        (_, Err(e)) if core.has_viewer() => {
-                            core.end_viewer(&format!("Screen capture failed: {e}"));
-                            if selection != Selection::All {
-                                eprintln!("Tip: the selected display may be gone; type m all to share every display.");
+                        Ok(Envelope::Forward { ip, port, payload }) => {
+                            let unicode = bytes[1] != 0;
+                            if let Some(decoded) = login::peer_payload(payload, unicode) {
+                                core.on_peer(&decoded, Route { address: ip, port }, now)?;
                             }
                         }
                         _ => {}
                     }
                 }
-            }
-            Some(Event::Line(line)) => {
-                let answer = line.trim();
-                let lower = answer.to_ascii_lowercase();
-                if core.awaiting_approval() {
-                    match lower.as_str() {
-                        "y" | "yes" | "v" => request_capture(Purpose::Approve { control: lower != "v" }, &mut in_flight, selection),
-                        "n" | "no" => core.decline(),
-                        _ => eprintln!("Answer y (allow control), v (view only) or n (refuse)."),
+                Event::RelayClosed(generation, e) => {
+                    if relay.as_ref().is_some_and(|r| r.generation == generation) {
+                        relay = None;
+                        core.end_viewer(&format!("The incoming relay disconnected: {e}"));
                     }
-                } else if let Some(rest) = lower.strip_prefix("m ") {
-                    match Selection::parse(rest.trim()) {
-                        Ok(s) => {
-                            selection = s;
-                            eprintln!("Sharing {}.", match s { Selection::All => "all displays".into(), Selection::Display(n) => format!("display {n}") });
-                        }
-                        Err(e) => eprintln!("{e}"),
-                    }
-                } else if core.has_viewer() {
-                    match lower.as_str() {
-                        "c" => {
-                            core.set_control_allowed(!core.control_allowed());
-                            eprintln!("Control is {}.", if core.control_allowed() { "allowed" } else { "off (view only)" });
-                        }
-                        "x" | "q" => core.end_viewer("You ended the incoming session."),
-                        "" => {}
-                        _ => if !tools.command(answer, core.tools_route()) { eprintln!("{HELP}") },
-                    }
-                } else if !answer.is_empty() {
-                    eprintln!("No viewer is connected. m N / m all chooses the shared display.");
                 }
-            }
-            Some(Event::StdinClosed) => {}
-            Some(Event::Interrupt) => {
-                if stopping {
-                    std::process::exit(130);
+                Event::Captured(t, result) => {
+                    // Hand the input that already arrived to the desktop before
+                    // encoding this frame: zstd must not delay a click.
+                    flush(&mut core, &relay, &input, &mut tools, opts);
+                    if let Some((_, purpose)) = in_flight.filter(|(id, _)| *id == t) {
+                        in_flight = None;
+                        match (purpose, result) {
+                            (Purpose::Approve { control }, Ok(frame)) if core.awaiting_approval() => core.approve(frame, control, now)?,
+                            (Purpose::Stream, Ok(frame)) => core.submit_frame(frame, now)?,
+                            (_, Err(e)) if core.has_viewer() => {
+                                core.end_viewer(&format!("Screen capture failed: {e}"));
+                                if selection != Selection::All {
+                                    eprintln!("Tip: the selected display may be gone; type m all to share every display.");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                stopping = true;
-                eprintln!("\nStopping…");
-                core.end_viewer("The host stopped sharing.");
+                Event::Line(line) => {
+                    let answer = line.trim();
+                    let lower = answer.to_ascii_lowercase();
+                    if core.awaiting_approval() {
+                        match lower.as_str() {
+                            "y" | "yes" | "v" => request_capture(Purpose::Approve { control: lower != "v" }, &mut in_flight, selection),
+                            "n" | "no" => core.decline(),
+                            _ => eprintln!("Answer y (allow control), v (view only) or n (refuse)."),
+                        }
+                    } else if let Some(rest) = lower.strip_prefix("m ") {
+                        match Selection::parse(rest.trim()) {
+                            Ok(s) => {
+                                selection = s;
+                                eprintln!("Sharing {}.", match s { Selection::All => "all displays".into(), Selection::Display(n) => format!("display {n}") });
+                            }
+                            Err(e) => eprintln!("{e}"),
+                        }
+                    } else if core.has_viewer() {
+                        match lower.as_str() {
+                            "c" => {
+                                core.set_control_allowed(!core.control_allowed());
+                                eprintln!("Control is {}.", if core.control_allowed() { "allowed" } else { "off (view only)" });
+                            }
+                            "x" | "q" => core.end_viewer("You ended the incoming session."),
+                            "" => {}
+                            _ => if !tools.command(answer, core.tools_route()) { eprintln!("{HELP}") },
+                        }
+                    } else if !answer.is_empty() {
+                        eprintln!("No viewer is connected. m N / m all chooses the shared display.");
+                    }
+                }
+                Event::StdinClosed => {}
+                Event::Interrupt => {
+                    if stopping {
+                        std::process::exit(130);
+                    }
+                    stopping = true;
+                    eprintln!("\nStopping…");
+                    core.end_viewer("The host stopped sharing.");
+                }
+                Event::ToolsWake => {}
             }
-            Some(Event::ToolsWake) | None => {}
         }
 
         if relay.as_ref().is_some_and(|r| r.address_deadline.is_some_and(|t| t <= now)) {
