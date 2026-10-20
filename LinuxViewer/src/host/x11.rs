@@ -90,6 +90,26 @@ pub fn zpixmap_to_rgb555(data: &[u8], width: usize, rows: usize, f: &PixelFormat
         return Err("X11 returned a short image".into());
     }
     let bytes = bpp / 8;
+    // The usual desktop format: 32 bits per pixel, little endian, eight
+    // bits per channel. This path has no branches, so the compiler can
+    // handle several pixels at once.
+    let standard = bytes == 4 && !f.msb_first && f.red_mask == 0x00ff_0000
+        && f.green_mask == 0x0000_ff00 && f.blue_mask == 0x0000_00ff;
+    if standard {
+        for y in (0..rows).rev() {
+            let row = &data[y * stride..y * stride + width * 4];
+            let words: Vec<u16> = row.chunks_exact(4).map(|px| {
+                let p = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
+                ((p & 0xff) >> 3) | ((((p >> 8) & 0xff) >> 3) << 5) | ((((p >> 16) & 0xff) >> 3) << 10)
+            }).collect();
+            let start = out.len();
+            out.resize(start + width * 2, 0);
+            for (w, slot) in words.iter().zip(out[start..].chunks_exact_mut(2)) {
+                slot.copy_from_slice(&w.to_le_bytes());
+            }
+        }
+        return Ok(());
+    }
     let (red, green, blue) = (Channel::new(f.red_mask), Channel::new(f.green_mask), Channel::new(f.blue_mask));
     for y in (0..rows).rev() {
         let row = &data[y * stride..y * stride + width * bytes];
