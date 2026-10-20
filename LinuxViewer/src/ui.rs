@@ -213,7 +213,7 @@ struct App {
     compose: Option<String>,
     notice: Option<(String, Instant)>,
     /// Newest pointer move, not sent yet (coalesced, see MOVE_INTERVAL).
-    pending_move: Option<Vec<u8>>,
+    pending_move: Option<Vec<Vec<u8>>>,
     /// When the last pointer move went out.
     last_move: Instant,
     /// When the coalesced pointer move is due.
@@ -366,7 +366,7 @@ impl App {
     /// Queue a pointer move. Only the newest position is kept, and it goes
     /// out at most every MOVE_INTERVAL, so a fast mouse cannot flood the
     /// connection and delay the click that follows it.
-    fn queue_move(&mut self, payload: Vec<u8>) {
+    fn queue_move(&mut self, payload: Vec<Vec<u8>>) {
         self.pending_move = Some(payload);
         let now = Instant::now();
         if self.last_move.elapsed() >= MOVE_INTERVAL {
@@ -381,7 +381,7 @@ impl App {
         if let Some(payload) = self.pending_move.take() {
             self.last_move = now;
             self.move_due = None;
-            self.send(vec![payload]);
+            self.send(payload);
         }
     }
 
