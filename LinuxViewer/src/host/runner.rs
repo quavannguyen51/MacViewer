@@ -146,6 +146,16 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
         for t in [core.next_wake(), relay.as_ref().and_then(|r| r.address_deadline)].into_iter().flatten() {
             wake = wake.min(t);
         }
+        // An auto-approved connection must not wait for the next event: the
+        // first frame is needed to complete the approval.
+        if in_flight.is_none() && core.needs_approval_frame() {
+            if let Some(control) = opts.auto_approve {
+                core.mark_approval_frame();
+                ticket += 1;
+                in_flight = Some((ticket, Purpose::Approve { control }));
+                let _ = capture.send(CaptureJob { ticket, selection });
+            }
+        }
         let event = match rx.recv_timeout(wake.saturating_duration_since(now)) {
             Ok(ev) => Some(ev),
             Err(mpsc::RecvTimeoutError::Timeout) => None,
@@ -303,6 +313,7 @@ pub fn run(registration: &Registration, master_proof: Option<String>, backend: B
                 request_capture(Purpose::Approve { control }, &mut in_flight, selection);
             }
         }
+
         flush(&mut core, &relay, &input, &mut tools, opts);
         if let (Some(route), Some(w)) = (core.tools_route(), relay.as_ref().and_then(|r| r.writer.as_ref())) {
             for payload in tools.outgoing(route) {
