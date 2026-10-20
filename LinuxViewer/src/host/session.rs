@@ -432,10 +432,8 @@ mod tests {
         assert!(core.take_capture_due(now + Duration::from_millis(40)));
         core.submit_frame(frame(2), now).unwrap();
         assert_eq!(sent(&mut core).len(), 1);
-        assert!(core.take_capture_due(now + Duration::from_millis(80)));
-        core.submit_frame(frame(3), now).unwrap();
-        assert_eq!(sent(&mut core).len(), 1);
-        // The pipeline is full: no third frame until an acknowledgment.
+        // The pipeline now holds two frames: no capture until one of them is
+        // acknowledged.
         assert!(!core.take_capture_due(now + Duration::from_secs(1)));
         core.on_peer(b"18", route(), now).unwrap();
         assert!(core.take_capture_due(now + Duration::from_secs(1)));
