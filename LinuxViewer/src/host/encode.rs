@@ -419,6 +419,11 @@ mod tests {
         // Painting the first frame and then the delta must give the same
         // picture as painting both full frames.
         assert_eq!(paint(&[&first, &full]), paint(&[&first, &delta]));
+
+        // The same with the trained dictionary, which the viewer loads too.
+        let first_dict = full_frame_with(&before, 1, Compression::Zstandard, Some(crate::screen::SCREEN_DICTIONARY)).unwrap();
+        let delta_dict = delta_frame(&after, &before, 2, Some(crate::screen::SCREEN_DICTIONARY)).unwrap();
+        assert_eq!(paint(&[&first_dict, &full]), paint(&[&first_dict, &delta_dict]));
     }
 
     /// The changed rectangles must cover every changed pixel.

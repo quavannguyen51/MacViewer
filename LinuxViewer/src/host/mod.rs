@@ -41,17 +41,21 @@ pub struct Options {
     /// viewer acknowledges them. None keeps the UltraViewer default (40 ms).
     pub pacing_ms: Option<u64>,
     /// Compress the screen with the trained dictionary the Windows desktop
-    /// loads, so the frames are smaller.
+    /// loads, so the frames are smaller. On by default; turn it off when the
+    /// other side cannot read those frames.
     pub dictionary: bool,
 }
 
 pub const USAGE: &str = "linuxviewer host [--auto-approve control|view] [--monitor N|all] [--clipboard] \
-                         [--backend auto|x11|wayland] [--download-dir PATH] [--pacing MS] [--zstd-dict]";
+                         [--backend auto|x11|wayland] [--download-dir PATH] [--pacing MS]
+                         [--zstd-dict] [--no-zstd-dict]";
 
 impl Options {
     /// Parses the arguments after `host`.
     pub fn parse(args: &[String]) -> Result<Self> {
-        let mut o = Options::default();
+        // The trained screen dictionary makes the frames smaller, and the
+        // Windows desktop uses the same one.
+        let mut o = Options { dictionary: true, ..Options::default() };
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             let mut value = |name: &str| it.next().cloned().ok_or_else(|| format!("{name} needs a value\nusage: {USAGE}"));
@@ -65,6 +69,7 @@ impl Options {
                 "--clipboard" => o.clipboard = true,
                 "--pacing" => o.pacing_ms = Some(parse_pacing(&value(arg)?)?),
                 "--zstd-dict" => o.dictionary = true,
+                "--no-zstd-dict" => o.dictionary = false,
                 "--backend" => o.backend = match value(arg)?.as_str() {
                     "auto" => BackendChoice::Auto,
                     "x11" => BackendChoice::X11,
@@ -159,8 +164,10 @@ mod tests {
         let o = Options::parse(&args("--auto-approve view --monitor 2 --clipboard --backend wayland --download-dir /tmp/x")).unwrap();
         assert_eq!(o, Options { auto_approve: Some(false), selection: Selection::Display(2), clipboard: true,
                                 backend: BackendChoice::Wayland, download_dir: Some("/tmp/x".into()), pacing_ms: None,
-                                dictionary: false });
-        assert_eq!(Options::parse(&[]).unwrap(), Options::default());
+                                dictionary: true });
+        assert_eq!(Options::parse(&[]).unwrap().dictionary, true);
+        assert_eq!(Options::parse(&args("--no-zstd-dict")).unwrap().dictionary, false);
+        assert_eq!(Options::parse(&args("--zstd-dict")).unwrap().dictionary, true);
         assert_eq!(Options::parse(&args("--auto-approve control")).unwrap().auto_approve, Some(true));
         for bad in ["--auto-approve", "--auto-approve yes", "--monitor 0", "--backend mir", "--bogus"] {
             assert!(Options::parse(&args(bad)).is_err(), "{bad}");

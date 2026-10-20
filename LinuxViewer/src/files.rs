@@ -15,7 +15,10 @@ pub const MAX_PART: usize = 32_000;
 /// Sizes/offsets must also be exact as f64.
 pub const MAX_FILE_SIZE: u64 = 999_999_999_999_999;
 pub const MAX_TRANSFERS: usize = 16;
-pub const PARTS_IN_FLIGHT: usize = 2;
+/// How many chunks are on the wire at the same time. Two is enough for the
+/// screen, but a file needs more to keep the link busy: with eight chunks the
+/// throughput is eight times the round trip instead of two.
+pub const PARTS_IN_FLIGHT: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Offer {
