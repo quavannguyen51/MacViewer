@@ -82,23 +82,10 @@ pub struct SessionHandle {
     shared: Arc<Shared>,
 }
 
-impl ClientSession {
-    /// A clone of the session handle, for a thread that outlives the window.
-    pub fn handle(&self) -> SessionHandle {
-        self.handle.clone()
-    }
-}
-
 impl std::ops::Deref for ClientSession {
     type Target = SessionHandle;
     fn deref(&self) -> &SessionHandle {
         &self.handle
-    }
-}
-
-impl ClientSession {
-    pub fn handle(&self) -> SessionHandle {
-        self.handle.clone()
     }
 }
 
