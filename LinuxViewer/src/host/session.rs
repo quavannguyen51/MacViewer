@@ -455,8 +455,25 @@ mod tests {
         Frame { width: 2, height: 2, rgb555_bottom_up: vec![v; 8], ..Default::default() }
     }
 
+    /// The messages that went to the viewer. The screen frames are still
+    /// waiting for the encoder thread, so they are compressed here.
     fn sent(core: &mut Core) -> Vec<Vec<u8>> {
-        core.out.drain(..).filter_map(|a| if let Action::Peer(_, b) = a { Some(b) } else { None }).collect()
+        core.out
+            .drain(..)
+            .filter_map(|a| match a {
+                Action::Peer(_, b) => Some(b),
+                Action::Frame { sequence, payload, .. } => {
+                    let dict = core.dictionary.then_some(crate::screen::SCREEN_DICTIONARY);
+                    Some(match payload {
+                        FramePayload::Full(frame) => {
+                            encode::full_frame_with(&frame, sequence, encode::Compression::Zstandard, dict).unwrap()
+                        }
+                        FramePayload::Delta(delta) => encode::compress_delta(&delta, sequence, dict).unwrap(),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     // HostCapturePacingTests.swift
